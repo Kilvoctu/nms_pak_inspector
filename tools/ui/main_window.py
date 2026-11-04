@@ -1306,10 +1306,7 @@ class _AboutDialog(QDialog):
         )
         layout.addWidget(name_label)
         body_label = QLabel(
-            "Verifies your No Man's Sky mods against the real vanilla pak data, "
-            "bakes them into the paks with a targeted injection (unchanged data "
-            "copied verbatim), offers a loose install instead, and lets you "
-            "inspect and edit every field against the full vanilla tree.",
+            "A simple tool that can verify, inspect, and install No Man's Sky mods",
             self,
         )
         body_label.setWordWrap(True)
@@ -1353,7 +1350,7 @@ class _NexusInfoDialog(QDialog):
             note = QLabel(
                 f"\"{mod_name}\" was not recognized as a Nexus download.<br>"
                 "Nexus archives are named like:<br>"
-                "<code>Name ModID Version 2026-09-11T18-32Z Hash.zip</code>",
+                "<code>Name ModID Version YYYY-MM-DDTHH-MMZ Hash.zip</code>",
                 self,
             )
             note.setWordWrap(True)

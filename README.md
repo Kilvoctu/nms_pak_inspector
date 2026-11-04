@@ -1,9 +1,9 @@
 # NMS Pak Inspector
 
-Simple GUI that can verify, inspect, and install No Man's Sky mods. This app is built mainly for personal use.
+Simple tool that can verify, inspect, and install No Man's Sky mods. This app is built mainly for personal use.
 
 <p align="center">
-  <a href="preview.png"><img src="preview.png" width="700" alt="The DSV Manager: User Profile tab"></a>
+  <a href="preview.png"><img src="preview.png" width="700"></a>
 </p>
 
 ## Setup/Usage

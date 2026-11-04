@@ -23,7 +23,7 @@ _EXT_RE = re.compile(r"\.(zip|rar|7z)$", re.IGNORECASE)
 def parse_nexus_filename(path: str | Path) -> dict | None:
     """Deduce {name, mod_id, version, uploaded} from a Nexus download filename; None if not one.
 
-    New scheme: ``Name ModID Version 2026-09-11T18-32Z Hash.zip``; old: ``Name-ModID-Version-<epoch>.zip``."""
+    New scheme: ``Name ModID Version YYYY-MM-DDTHH-MMZ Hash.zip``; old: ``Name-ModID-Version-<epoch>.zip``."""
     filename = Path(path).name
     ext = _EXT_RE.search(filename)
     if not ext:
