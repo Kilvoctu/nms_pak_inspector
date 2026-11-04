@@ -3473,17 +3473,17 @@ class MainWindow(QMainWindow):
                     and ver.status in (verify_mods.FV_ERROR, verify_mods.FV_OUTDATED)
                     and okey not in ignored
                 ):
-                    action = menu.addAction("Ignore verification error (inject anyway)")
+                    action = menu.addAction("Ignore verification warning")
                     action.triggered.connect(
                         lambda checked=False, k=okey, m=ver.message: self._ignore_file_error(k, m)
                     )
                 if okey in excluded:
-                    action = menu.addAction("Include file in mod (remove exclusion)")
+                    action = menu.addAction("Include file in mod")
                     action.triggered.connect(
                         lambda checked=False, k=okey: self._set_file_excluded(k, False)
                     )
                 elif hit is not None and not hit.skipped:
-                    action = menu.addAction("Exclude file from mod (stays vanilla)")
+                    action = menu.addAction("Exclude file from mod")
                     action.triggered.connect(
                         lambda checked=False, k=okey: self._set_file_excluded(k, True)
                     )
@@ -3527,15 +3527,13 @@ class MainWindow(QMainWindow):
         return None
 
     def _ignore_file_error(self, key: str, message: str) -> None:
-        """User-accepted verification failure: verify as OK, inject the file anyway."""
-        if QMessageBox.question(
-            self, "Ignore verification error",
-            "Inject this file even though verification failed?\n\n"
-            f"{message[:400]}"
-            "\n\nNote: for EXML mods this only helps if the vanilla decompile is what "
-            "failed - the merge still needs vanilla data at inject time.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        ) != QMessageBox.StandardButton.Yes:
+        """User-accepted verification failure: stop flagging the file; injection is allowed."""
+        box = QMessageBox(QMessageBox.Icon.Question, "Ignore verification warning",
+                          "Stop flagging this file and allow inject/install despite the warning?",
+                          QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                          self)
+        box.setDetailedText(message)
+        if box.exec() != QMessageBox.StandardButton.Yes:
             return
         ignored, excluded = verify_mods.load_overrides()
         ignored.add(key)
