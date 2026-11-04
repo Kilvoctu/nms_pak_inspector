@@ -1,8 +1,4 @@
-"""Project layout: every well-known path in one place.
-
-The app owns its data (settings, index, caches, downloaded compilers) inside
-the project folder and never scans arbitrary user paths.
-"""
+"""Project layout: every well-known path in one place (owned by the app)."""
 
 import os
 import subprocess
@@ -54,25 +50,19 @@ def inject_state_file() -> Path:
 
 
 def inject_backup_dir() -> Path:
-    """Pre-injection entry snapshots - the revert source of truth.
-
-    Deliberately NOT inside .cache: these are the only copy of the vanilla
-    bytes once a pak has been modified."""
+    """Pre-injection snapshots - the only copy of vanilla bytes after a pak is modified."""
     return project_root() / "inject_backups"
 
 
 GAME_PACKAGE = "HelloGames.NoMansSky"
 
-# Suppress the console window a child process (powershell, MBINCompiler)
-# would pop up when the GUI runs as a windowed exe (no parent console to
-# inherit); 0 is a no-op where the constant doesn't exist (non-Windows).
+# CREATE_NO_WINDOW: no console popup for child processes (powershell, MBINCompiler)
+# in the windowed exe; 0 is a no-op on non-Windows.
 _SUBPROCESS_FLAGS = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
 def appx_install_location() -> str | None:
-    """MS Store install location of the game (works even without a junction).
-
-    Returns the *real* WindowsApps path; slow (PowerShell) - callers cache."""
+    """MS Store install location of the game; slow (PowerShell) - callers cache."""
     try:
         result = subprocess.run(
             [
@@ -91,11 +81,7 @@ def appx_install_location() -> str | None:
 
 
 def find_pcbanks(game_dir: str | Path) -> str | None:
-    """Locate the GAMEDATA\\PCBANKS folder under a game install directory.
-
-    Known layouts are tried first (MS Store/Xbox: <game>\\Content\\GAMEDATA\\
-    PCBANKS; Steam/GOG: <game>\\GAMEDATA\\PCBANKS), then a bounded recursive
-    search for any PCBANKS folder that contains .pak files."""
+    """Locate GAMEDATA\\PCBANKS under a game install (known layouts, then a shallow search)."""
     game = Path(game_dir)
     if not game.is_dir():
         return None

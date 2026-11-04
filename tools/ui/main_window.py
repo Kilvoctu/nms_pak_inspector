@@ -1,11 +1,4 @@
-"""Main window of the NMS Pak Inspector GUI.
-
-Layout philosophy copied from ZZZ Mod Housekeeper: frameless window with a
-custom title bar, one accent color used sparingly, a vertical stack of
-title bar -> path rows -> status strip -> versions row -> mods tree ->
-console log, background TaskWorkers for anything slow, and settings
-persisted across runs.
-"""
+"""Main window: frameless Housekeeper-style layout, TaskWorkers, persisted settings."""
 
 import copy
 import hashlib
@@ -26,12 +19,14 @@ from PySide6.QtCore import (
     QSize,
     Qt,
     QTimer,
+    QUrl,
     Signal,
 )
 from PySide6.QtGui import (
     QBrush,
     QColor,
     QCursor,
+    QDesktopServices,
     QDragEnterEvent,
     QDragLeaveEvent,
     QDragMoveEvent,
@@ -84,6 +79,7 @@ from .. import (
     install_mods,
     mbincompiler,
     merge_mods,
+    nexus,
     paklib,
     repo,
     verify_mods,
@@ -107,6 +103,7 @@ from .worker import (
     inject_mod_worker,
     install_mod_worker,
     merge_preview_worker,
+    nexus_info_worker,
     revert_all_worker,
     revert_mod_worker,
     scan_mods_worker,
@@ -177,9 +174,7 @@ def _settings():
 
 
 def _restored_geometry(raw: object) -> QByteArray | None:
-    """Decode a stored window geometry for restoreGeometry; None when unusable.
-
-    State values are hex strings of saveGeometry() bytes (IniFormat-safe)."""
+    """Decode a stored geometry (hex of saveGeometry bytes); None when unusable."""
     if isinstance(raw, QByteArray):
         return raw
     if isinstance(raw, str) and raw:
@@ -460,10 +455,7 @@ class _CollisionDialog(QDialog):
 
 
 class _RowActionDelegate(QStyledItemDelegate):
-    """Paints the per-mod action buttons directly into the Actions column
-    (no widget-per-row). Buttons: Pak inject/Revert + Install/Remove, with
-    native hover/pressed states, greyed when blocked, progress text while a
-    worker runs. Clicks route back to the window handlers."""
+    """Paints the per-mod action buttons into the Actions column; clicks route to handlers."""
 
     def __init__(self, tree: QTreeWidget, on_action, parent=None) -> None:
         super().__init__(parent)
@@ -543,9 +535,8 @@ class _RowActionDelegate(QStyledItemDelegate):
             self._tree.viewport().update()
         return False
 
-    # Button tooltips: Qt's native item tooltips show the combined Actions-cell
-    # text set in MainWindow._update_action_states - no manual QToolTip calls
-    # here (they fought the built-in timer and made tooltips flicker away).
+    # Tooltips: Qt's native item tooltips show the combined Actions-cell text
+    # from MainWindow._update_action_states (no manual QToolTip calls here).
 
     # --- painting ------------------------------------------------------------
 
@@ -599,9 +590,7 @@ class _RowActionDelegate(QStyledItemDelegate):
 
 
 class _MergedPreview(QTreeWidget):
-    """Render the merged result (what the game will receive), highlighting
-    values that differ from vanilla and inserted entries. Shared by the mod
-    editor and the merge/resolution dialog."""
+    """Merged-result tree with diff highlighting; shared by editor and merge dialog."""
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -706,11 +695,7 @@ class _TreeValueDelegate(QStyledItemDelegate):
 
 
 class _CompareTrees(QWidget):
-    """Side-by-side trees: left = the mod's fields, right = the FULL vanilla
-    tree (browse everything, pull fields into the mod). Linked navigation on
-    paired nodes, diff highlighting, changed-only filter, search, inline
-    value editing, structural context menu. Emits ``edited`` after any
-    in-memory change to the mod tree."""
+    """Side-by-side mod/vanilla trees: linked nav, diff highlight, inline edits."""
 
     edited = Signal()
 
@@ -812,12 +797,7 @@ class _CompareTrees(QWidget):
 
     def _fill_mod(self, mod_props, van_props, needle: str,
                   changed_only: bool) -> tuple[list, list]:
-        """Build the left (mod) tree items paired against vanilla.
-
-        Items are created detached and returned; the caller attaches them.
-        In filtered (changed-only) mode, right-hand vanilla counterparts are
-        returned as well (mirroring the left hierarchy); in full mode the
-        right tree is built by ``_fill_van``, linked via ``_pair_vpid``."""
+        """Build the left (mod) tree items; filtered mode also returns vanilla mirrors."""
         van_by_name: dict[str | None, list] = {}
         for vp in van_props:
             van_by_name.setdefault(vp.get("name"), []).append(vp)
@@ -903,9 +883,8 @@ class _CompareTrees(QWidget):
                 litem.setFlags(litem.flags() | Qt.ItemFlag.ItemIsEditable)
             for child in child_left:
                 litem.addChild(child)
-            # Register the pairing: in filtered mode the right counterpart is
-            # built here (mirroring the left hierarchy); in full mode
-            # _fill_van links via _pair_vpid.
+            # Filtered mode builds the right counterpart here; full mode lets
+            # _fill_van link via _pair_vpid.
             if vp is not None:
                 self._pair_vpid[id(vp)] = litem
             left_out.append(litem)
@@ -929,11 +908,7 @@ class _CompareTrees(QWidget):
         return value is not None and needle in str(value).lower()
 
     def _fill_van(self, van_props, needle: str) -> list[QTreeWidgetItem]:
-        """Right tree: the complete vanilla file, independently walked.
-
-        Items are created detached and returned; the caller attaches them.
-        Leaves the mod changes get the same amber highlight (with the mod's
-        value in the tooltip), and leaves the mod removes turn red."""
+        """Right tree: the complete vanilla file; mod-touched leaves get highlight colors."""
         right_out: list[QTreeWidgetItem] = []
         for vp in van_props:
             name = vp.get("name") or "?"
@@ -987,11 +962,8 @@ class _CompareTrees(QWidget):
             self._syncing = False
 
     def _sync_scroll_from(self, source: QTreeWidget) -> None:
-        """Anchor-based sync: align the other pane on the counterpart of the
-        source's first visible item. Unpaired items (insertions, vanilla-only
-        nodes) align on the nearest *preceding* paired item - the same
-        convention diff viewers use - so the other pane shows the
-        corresponding region rather than jumping to a container."""
+        """Align the other pane on the counterpart of the first visible item
+        (unpaired items anchor to the nearest preceding paired one)."""
         if self._building or self._syncing:
             return
         item = source.itemAt(QPoint(0, 0))
@@ -1092,9 +1064,7 @@ class _CompareTrees(QWidget):
         menu.exec(self._left.viewport().mapToGlobal(pos))
 
     def _add_move_actions(self, menu: QMenu, elem) -> None:
-        """Move up/down within the same parent. Field order is cosmetic
-        (the compiler matches fields by name) but a canonical order keeps
-        hand-edited files tidy."""
+        """Move up/down within the same parent (keeps hand-edited files tidy)."""
         mod_parents = {c: p for p in self._mod_root.iter() for c in p}
         parent = mod_parents.get(elem)
         if parent is None:
@@ -1110,9 +1080,8 @@ class _CompareTrees(QWidget):
 
     def _apply_op(self, op: str, elem) -> None:
         if op == "remove" and self._unpaired_same_name_sibling(elem) is not None:
-            # Duplicate consume: an unpaired same-name sibling exists, so
-            # deleting this copy lets the sibling take the vanilla pairing -
-            # a _remove directive would strand the sibling as [inserted].
+            # Duplicate consume: delete this copy so its unpaired same-name
+            # sibling takes the vanilla pairing (a _remove would strand it).
             op = "delete"
         if op == "remove":
             elem.set("_remove", "")
@@ -1173,9 +1142,7 @@ class _CompareTrees(QWidget):
         menu.exec(self._right.viewport().mapToGlobal(pos))
 
     def _pull_into_mod(self, van_elem) -> None:
-        """Adopt a vanilla field into the mod: build the minimal chain of
-        pairing containers down to the target, then copy it. The new leaf's
-        value starts at vanilla's, ready to edit."""
+        """Adopt a vanilla field into the mod (minimal container chain, value = vanilla's)."""
         van_parents = {c: p for p in self._van_root.iter() for c in p}
         chain = []
         node = van_elem
@@ -1371,6 +1338,162 @@ class _AboutDialog(QDialog):
         super().showEvent(event)
 
 
+class _NexusInfoDialog(QDialog):
+    """Nexus metadata for one mod: versions, update verdict, page link."""
+
+    def __init__(self, mod_name: str, result: dict, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Nexus info")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(8)
+
+        parsed = result.get("parsed")
+        if parsed is None:
+            note = QLabel(
+                f"\"{mod_name}\" was not recognized as a Nexus download.<br>"
+                "Nexus archives are named like:<br>"
+                "<code>Name ModID Version 2026-09-11T18-32Z Hash.zip</code>",
+                self,
+            )
+            note.setWordWrap(True)
+            layout.addWidget(note)
+            self.setFixedWidth(480)
+            self.adjustSize()
+            return
+
+        mod = result.get("mod")
+        latest = result.get("latest")
+        error = result.get("error")
+
+        title = QLabel(
+            f'<span style="font-size:13pt; font-weight:bold;">'
+            f"{mod.get('name', parsed['name']) if mod else parsed['name']}</span>",
+            self,
+        )
+        title.setWordWrap(True)
+        layout.addWidget(title)
+
+        def row(label: str, value: str, color: QColor | None = None) -> None:
+            # No wordWrap: the dialog width adapts to the widest row instead.
+            text = QLabel(f"<b>{label}:</b> {value}", self)
+            if color is not None:
+                text.setStyleSheet(
+                    f"color: rgb({color.red()}, {color.green()}, {color.blue()});"
+                )
+            layout.addWidget(text)
+
+        def stamp(epoch) -> str:
+            if not epoch:
+                return "?"
+            from datetime import datetime, timezone
+
+            return datetime.fromtimestamp(epoch, tz=timezone.utc).strftime(
+                "%Y-%m-%d %H:%M UTC"
+            )
+
+        if mod:
+            uploader = (mod.get("user") or {}).get("name") or "?"
+            row(
+                "Author",
+                f"{uploader} · {mod.get('mod_downloads', 0):,} downloads",
+            )
+            if mod.get("summary"):
+                summary = QLabel(mod["summary"], self)
+                summary.setWordWrap(True)
+                layout.addWidget(summary)
+        row("Your version", f"{parsed['version']}  (uploaded {stamp(parsed['uploaded'])})")
+        if latest:
+            latest_stamp = stamp(latest.get("uploaded_timestamp"))
+            row(
+                "Latest on Nexus",
+                f"{latest.get('version') or '?'}  (uploaded {latest_stamp})",
+            )
+        if error:
+            row("Status", f"Nexus request failed - {error}", COLOR_ERROR)
+        elif latest is None:
+            row("Status", "no downloadable files listed on Nexus", COLOR_UNMATCHED)
+        elif nexus.is_newer_version(parsed["version"], latest.get("version") or ""):
+            row(
+                "Status",
+                f"update available: {parsed['version']} → {latest.get('version')}",
+                COLOR_MERGE,
+            )
+        else:
+            row("Status", "up to date", COLOR_CLEAN)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        page = QPushButton(f"Open Nexus page (mod {parsed['mod_id']})")
+        page.clicked.connect(
+            lambda: QDesktopServices.openUrl(QUrl(nexus.page_url(parsed["mod_id"])))
+        )
+        buttons.addWidget(page)
+        close = QPushButton("Close")
+        close.clicked.connect(self.accept)
+        buttons.addWidget(close)
+        layout.addLayout(buttons)
+        self.adjustSize()
+        # Content-derived width: wide enough for the widest row, capped so a
+        # long summary/error wraps instead of stretching the dialog.
+        self.setFixedWidth(min(max(self.sizeHint().width(), 420), 800))
+        self.adjustSize()
+
+    def showEvent(self, event: QShowEvent) -> None:
+        """Re-measure the height once real fonts exist; the width stays fixed."""
+        self.setFixedHeight(self.sizeHint().height())
+        super().showEvent(event)
+
+
+class _NexusKeyDialog(QDialog):
+    """Set the personal Nexus API key (paste, or import from SingularityMM)."""
+
+    def __init__(self, current: str, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Nexus API key")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(10)
+        info = QLabel(
+            "Nexus metadata needs a <b>personal API key</b> (one-time setup):<br>"
+            '1. Open <a href="https://www.nexusmods.com/users/myaccount?tab=api+access">'
+            "nexusmods.com → Settings → API Access</a><br>"
+            "2. Generate/copy a personal key and paste it below.",
+            self,
+        )
+        info.setWordWrap(True)
+        info.setOpenExternalLinks(True)
+        layout.addWidget(info)
+        self._edit = QLineEdit(self)
+        self._edit.setPlaceholderText("Paste API key…")
+        self._edit.setText(current)
+        layout.addWidget(self._edit)
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        clear = QPushButton("Clear")
+        clear.clicked.connect(self._clear)
+        buttons.addWidget(clear)
+        save = QPushButton("Save")
+        save.setDefault(True)
+        save.clicked.connect(self.accept)
+        buttons.addWidget(save)
+        layout.addLayout(buttons)
+        self.adjustSize()
+
+    def _clear(self) -> None:
+        self._edit.clear()
+        self.accept()
+
+    def key(self) -> str:
+        return self._edit.text().strip()
+
+    def showEvent(self, event: QShowEvent) -> None:
+        """Lock the measured size once, after the real-font layout exists."""
+        if self.minimumHeight() != self.maximumHeight():
+            self.setFixedSize(self.sizeHint())
+        super().showEvent(event)
+
+
 class _MergeDialog(QDialog):
     """Resolve cross-mod conflicts for a group injection and preview the
     merged result before anything is written."""
@@ -1513,9 +1636,7 @@ class _MergeDialog(QDialog):
 
 
 class _RawAssetDialog(QDialog):
-    """Inspector for non-MBIN mod files (textures, shaders, ...): sizes and
-    a byte-difference verdict against vanilla, plus an image preview for
-    decodable formats (DDS via Pillow). Read-only."""
+    """Read-only inspector for non-MBIN mod files: sizes, diff verdict, image preview."""
 
     def __init__(self, ver, mod, hit, pcbanks: str, parent=None) -> None:
         super().__init__(parent)
@@ -1603,12 +1724,7 @@ class _RawAssetDialog(QDialog):
 
 
 class _FieldDialog(QDialog):
-    """Review and edit one mod file's fields against the vanilla data.
-
-    Three views: changed fields, all fields (including values equal to
-    vanilla), and the merged result the game will receive. Value edits land
-    on the in-memory mod tree; Save writes the EXML back to the mod source
-    (loose folder or zip entry)."""
+    """Review/edit one mod file's fields (changed / all / merged views); Save writes the source."""
 
     _VERDICT_COLOR = {
         "OK": COLOR_CLEAN,
@@ -1635,9 +1751,8 @@ class _FieldDialog(QDialog):
         self._table_rows: dict[int, list] = {}
         self._dups: dict[int, int] = {}  # id(elem) -> duplicate group size
 
-        # In-memory mod tree. EXML files save as text; shipped MBINs are
-        # decompiled for editing and recompiled through the managed compiler
-        # on Save.
+        # In-memory mod tree; shipped MBINs are decompiled for editing and
+        # recompiled through the managed compiler on Save.
         data = verify_mods._read_mod_data(mod, hit.entry)
         self._is_exml = hit.entry.lower().endswith((".exml", ".mxml"))
         self._mod_root = verify_mods._parse_mod_tree(
@@ -2104,9 +2219,8 @@ class MainWindow(QMainWindow):
         self._installing_mod: str | None = None  # mod whose install/remove runs
         self._user_col_widths: dict[int, int] = {}  # widths the user chose
         self._fitting_columns = False  # guard: programmatic width changes
-        # Deferred re-flex + live persistence: nothing may touch the header
-        # while the user is actively dragging a section, or the drag snaps
-        # back to its pre-drag width (and the chosen width is never saved).
+        # Deferred re-flex + live persistence: touching the header mid-drag
+        # makes the drag snap back and lose the chosen width.
         self._col_fit_timer = QTimer(self)
         self._col_fit_timer.setSingleShot(True)
         self._col_fit_timer.setInterval(200)
@@ -2247,9 +2361,8 @@ class MainWindow(QMainWindow):
             self._tree.setColumnWidth(column, width)
         self._tree.header().setStretchLastSection(False)
         self._tree.header().setMinimumSectionSize(48)
-        # Column sizing: every width is the user's choice (persisted live).
-        # The Target pak(s) column only flexes when the window forces it, so
-        # the Inject column stays pinned visible at the right edge.
+        # Every width is the user's choice (persisted live); Target pak(s)
+        # only flexes when forced, keeping the Inject column pinned visible.
         self._tree.header().sectionResized.connect(self._on_col_resized)
         self._tree.setAlternatingRowColors(True)
         self._tree.setWordWrap(False)
@@ -2295,9 +2408,8 @@ class MainWindow(QMainWindow):
         self._browse_btn.clicked.connect(self._on_browse)
         self._game_browse_btn.clicked.connect(self._on_browse_game)
 
-        # Instant local info: the managed compiler folder is a cheap read; the
-        # game version (PowerShell) and the update check run in the background
-        # at the end of the startup chain.
+        # Compiler folder is a cheap read; version + update check run in the
+        # background at the end of the startup chain.
         self._set_version_label(game_span=None, compiler_tag=self._local_compiler_tag())
 
     def _build_menu(self) -> None:
@@ -2330,6 +2442,8 @@ class MainWindow(QMainWindow):
         menu.addSeparator()
         self._compiler_action = menu.addAction("Check for compiler updates")
         self._compiler_action.triggered.connect(self._on_compiler_action)
+        nexus_login = menu.addAction("Nexus API key…")
+        nexus_login.triggered.connect(self._on_nexus_key_menu)
         menu.addSeparator()
         about = menu.addAction("About")
         about.triggered.connect(self._show_about)
@@ -2369,11 +2483,7 @@ class MainWindow(QMainWindow):
             self._on_rebuild_index()
 
     def _load_inject_state(self) -> None:
-        """Load injection state; void it when the paks changed outside the app.
-
-        Our own injections refresh the index's size/mtime records, so they
-        never look stale. A genuinely stale index means the game updated and
-        the paks are vanilla again - backups would describe nothing real."""
+        """Load injection state; void it on external pak changes (game update)."""
         state = inject_mods.load_state()
         if state and self._index is not None:
             externally_changed = (
@@ -2517,11 +2627,7 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self._start_verify)
 
     def _handle_superseded(self, pending: list) -> bool:
-        """Prompt for mods that have a newer archive version.
-
-        Returns True when at least one old archive was replaced (a rescan is
-        needed). 'Keep both' remembers the pair so the prompt stops; closing
-        the dialog asks again on the next scan."""
+        """Prompt for newer-archive mods; True when an old archive was replaced."""
         replaced = False
         for mod, old_zips in pending:
             old_names = ", ".join(os.path.basename(z) for z in old_zips)
@@ -2618,10 +2724,7 @@ class MainWindow(QMainWindow):
         return counts
 
     def _update_mod_rows(self, mod_name: str) -> None:
-        """In-place refresh of one mod's tree rows after a targeted re-verify.
-
-        Only verification-derived cells change (Fields column, tooltips);
-        scan-derived cells (resolution status, pak path) stay untouched."""
+        """In-place refresh of one mod's verification-derived rows after a targeted re-verify."""
         mod = next((m for m in self._scan["mods"] if m.name == mod_name), None)
         item = self._mod_items.get(mod_name)
         if mod is None or item is None or self._verifications is None:
@@ -3067,6 +3170,43 @@ class MainWindow(QMainWindow):
         self._log_view.setVisible(shown)
         self._settings.setValue("show_console", shown)
 
+    # --- nexus ------------------------------------------------------------------
+
+    def _nexus_key(self) -> str:
+        return self._settings.value("nexus_api_key") or ""
+
+    def _on_nexus_key_menu(self) -> None:
+        self._show_nexus_key_dialog()
+
+    def _show_nexus_key_dialog(self) -> bool:
+        """The API-key dialog; True when a key is set afterwards."""
+        dialog = _NexusKeyDialog(self._nexus_key(), self)
+        dialog.exec()
+        key = dialog.key()
+        self._settings.setValue("nexus_api_key", key)
+        if key and key != self._nexus_key():
+            user = nexus.validate(key)
+            self.append_log(
+                f"Nexus API key set (account: {user})" if user
+                else "Nexus API key set (account check failed - offline?)"
+            )
+        elif not key:
+            self.append_log("Nexus API key cleared")
+        return bool(key)
+
+    def _on_nexus_info(self, mod_name: str) -> None:
+        mod = next((m for m in self._scan["mods"] if m.name == mod_name), None)
+        if mod is None:
+            return
+        # No key yet (or the user just cleared it): offer the one-time setup.
+        if not self._nexus_key() and not self._show_nexus_key_dialog():
+            return
+
+        def done(result: dict) -> None:
+            _NexusInfoDialog(mod_name, result, self).exec()
+
+        self._start_task(nexus_info_worker, self._nexus_key(), mod.path, on_done=done)
+
     def _toggle_maximized(self) -> None:
         if self.isMaximized():
             self.showNormal()
@@ -3104,6 +3244,10 @@ class MainWindow(QMainWindow):
                     (m.path for m in self._scan["mods"] if m.name == data[1]), None
                 )
                 if mod_path:
+                    info = menu.addAction("Info…")
+                    info.triggered.connect(
+                        lambda checked=False, n=data[1]: self._on_nexus_info(n)
+                    )
                     action = menu.addAction("Open in Explorer")
                     action.triggered.connect(
                         lambda: _open_in_explorer(mod_path)
@@ -3184,12 +3328,8 @@ class MainWindow(QMainWindow):
         return install_mods.safe_name(mod_name) in self._installed_mods
 
     def _on_col_resized(self, idx: int, _old: int, new: int) -> None:
-        """Record user column sizing; re-flex and persist after the drag.
-
-        The re-fit is deferred: re-layouting the header synchronously inside
-        a live interactive drag makes Qt abandon the drag (the section snaps
-        back to its pre-drag width), which is how chosen widths used to get
-        lost."""
+        """Record user column sizing; the re-fit is deferred (mid-drag re-layout
+        makes Qt abandon the drag and lose the width)."""
         if self._fitting_columns:
             return
         self._user_col_widths[idx] = new
@@ -3204,13 +3344,7 @@ class MainWindow(QMainWindow):
                 self._settings.setValue(f"col_width_{column}", width)
 
     def _fit_columns(self) -> None:
-        """Fit the tree columns to the viewport.
-
-        The Target pak(s) column absorbs the difference: it shrinks when the
-        window is too narrow for the user's other widths (keeping the Inject
-        column pinned visible) and grows only up to the width the user last
-        chose for it. Postponed while a mouse button is held: re-layouting
-        the header mid-drag makes Qt abandon the user's drag."""
+        """Fit columns to the viewport; Target pak(s) absorbs the difference (drag-deferred)."""
         if QApplication.mouseButtons() & Qt.MouseButton.LeftButton:
             self._col_fit_timer.start()  # mid-drag: try again once it ends
             return
@@ -3231,15 +3365,13 @@ class MainWindow(QMainWindow):
             self._fitting_columns = False
 
     def _update_action_states(self) -> None:
-        """Push each mod's action-button state into its tree row (the
-        delegate paints from this data)."""
+        """Push each mod's action-button state into its tree row for the delegate."""
         busy = self._worker is not None
         for name, item in self._mod_items.items():
             state = self._action_state(name, busy)
             item.setData(0, _ACTION_ROLE, state)
-            # Combined tooltip on the Actions cell: Qt's native item-tooltip
-            # machinery shows this reliably (the delegate no longer paints
-            # per-button QToolTip calls, which flickered).
+            # Combined tooltip on the Actions cell, shown by Qt's native
+            # item-tooltip machinery (per-button QToolTip calls flickered).
             tips = state.get("tips") or ("", "")
             item.setToolTip(
                 5,
@@ -3248,8 +3380,7 @@ class MainWindow(QMainWindow):
         self._tree.viewport().update()
 
     def _action_state(self, name: str, busy: bool) -> dict:
-        """Per-mod action labels, enabled flags and tooltips for the
-        Actions column (the delegate paints and hover-explains from this)."""
+        """Per-mod action labels, enabled flags and tooltips for the Actions column."""
         if name == self._injecting_mod:
             return {"busy": "Injecting…", "tips": ("", "")}
         if name == self._installing_mod:

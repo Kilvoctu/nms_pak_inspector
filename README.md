@@ -1,6 +1,6 @@
 # NMS Pak Inspector
 
-Simple GUI that can verify, inspect, and install No Man's Sky. This app is built mainly for personal use.
+Simple GUI that can verify, inspect, and install No Man's Sky mods. This app is built mainly for personal use.
 
 
 ## Setup/Usage
@@ -8,42 +8,26 @@ Simple GUI that can verify, inspect, and install No Man's Sky. This app is built
 2. Download/clone this repo.
 3. Run `build_exe.bat` and wait until it's done.
 4. Run `NMSPakInspector.exe`.
-5. Optional: click **Download compiler** in the menu to fetch MBINCompiler
-   (newest release matching your game version, kept in `mbincompilers/`).
-6. Point the app at your game folder and your mods folder; on first launch it
-   builds a pak index (takes a moment).
-7. Hopefully the rest is self-explanatory: pick a mod, check its verification
-   status, then **Pak inject** or **Install**.
+5. Optional: click `Check for compiler updates` in the menu (it downloads MBINCompiler when a newer release is available (kept in mbincompilers/)).
+6. Point the app at your game folder and your mods folder; on first launch it builds a pak index (takes a moment).
+7. Poke around and figure out the rest.
 
-*Alternatively, run from source: `pip install -r requirements.txt`, then `python main.py`.*
 
 ## Features
-- Mod list from a mods folder of zips and loose folders; drag and drop
-  archives or folders onto the window to add them.
-- Verification of every mod file against the real vanilla data: dry-run merge
-  of the mod's changed fields onto the decompiled vanilla MBIN, with per-field
-  verdicts (OK / FORMAT / MISSING / NO-OP / TEMPLATE) and per-file statuses
-  (verified / no-effect / format / outdated / error). Raw assets
-  (textures, shaders, ...) are byte-compared instead.
-- Pak injection into the vanilla paks with a targeted rewrite: unchanged
-  64 KB windows are copied compressed-verbatim, only windows overlapping
-  changed bytes are recompressed. Per-mod and group injection (colliding mods
-  are merged, field conflicts resolvable).
-- Automatic pre-injection backups; byte-exact revert any time.
-- Loose install into `GAMEDATA\MODS` as the alternative (mutually exclusive
-  with pak injection).
-- Editor per mod file: changed/all fields tables, side-by-side compare trees
-  with diff highlighting, merged preview, inline value editing with format
-  auto-fix, raw-asset inspector (DDS preview).
-- Game updates are handled: the app detects restored vanilla paks, clears
-  injection state, rebuilds the index, and re-verifies everything.
+- Lists mods from your mod folder; drag and drop archives or folders onto the window to add them.
+- Checks mod files against No Man's Sky's pak data without touching the game files; shows what's broken, outdated, or has no effect anymore.
+- Inject mod data straight into the game's pak data, only changing what needs to be rewritten.
+- Or standard loose installation into `GAMEDATA\MODS` (mutually exclusive with injection).
+- Mod merged ability when multiple mods touch the same file.
+- Automatic pre-injection backups with byte-exact revert.
+- Per mod inline editor with side-by-side tree comparison with diff highlighting, preview, format auto-fix, raw-asset inspector.
+- Basic NexusMods support shows author, description, local and latest release, and mod page link. Needs a personal Nexus API key, set once via the menu.
+- Automatically detects game updates (restored vanilla paks): clears injection state, rebuilds the index, and re-verifies everything.
 
-## Known Issues
-- The game shows a "tampering" warning on launch when vanilla paks are
-  modified (loads them fine).
-- Mods with outdated/error files can't be injected or installed until the mod
-  is updated for the current game version.
-- Jank.
+## Notes
+- NMS shows a "tampering" warning on launch when vanilla paks are modified (loads them fine).
+- Mods with outdated/error files can't be injected or installed until the mod is updated for the current game version.
+- This app is provided as-is, do not expect it to be user-friendly or bug-free. It is a personal tool. Use at your own risk.
 
 ## Credits & license
 

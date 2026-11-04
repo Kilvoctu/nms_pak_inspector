@@ -1,18 +1,4 @@
-"""Install/uninstall mods into the game's loose-mod loader folder.
-
-The game (Worlds Part II era and later) loads loose mods from
-``GAMEDATA\\MODS\\<folder>\\`` - raw files laid out in the game's internal
-tree (.MBIN/.EXML; .MXML is not loaded). This module copies a mod's game
-files there, preserving each file's game-relative path.
-
-State is derived from disk (the folder exists and is non-empty) - there is
-no separate state file, so manual changes in that folder are always
-reflected. Removal is a plain folder delete: loose installs never touch
-the paks, so no backups are needed.
-
-Note: a pak injection and a loose install of the same mod must not coexist
-(the file would apply twice) - the GUI enforces mutual exclusion.
-"""
+"""Install/uninstall mods into the game's loose-mod loader (GAMEDATA\\MODS); disk-derived state."""
 
 import os
 import re

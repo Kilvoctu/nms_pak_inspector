@@ -1,15 +1,6 @@
-"""Build a static path->pak index of every .pak in the game's PCBANKS folder.
+"""Build a static path->pak index of every .pak in PCBANKS (header-only reads, ~3 s).
 
-Reads only pak headers + filepath data (never the bulk data), so the whole
-scan of ~100 paks / 33 GB takes ~3 seconds. The resulting pak_index.json is
-a static asset: refresh it only after a game update.
-
-Usage:
-    python -m tools.index_paks [--pcbanks PATH] [--out PATH]
-
-The output maps every pak to its stored file paths (exactly as the pak
-records them - bare names for some paks, full paths for others), plus
-sizes and a game-version stamp for cache invalidation.
+Usage: python -m tools.index_paks [--pcbanks PATH] [--out PATH]
 """
 import argparse
 import glob
@@ -99,11 +90,7 @@ def build_index(pcbanks: str, verbose: bool = True) -> dict:
 
 
 def is_stale(index: dict, pcbanks: str = None) -> bool:
-    """True if any pak on disk changed size or mtime since the index was built.
-
-    Game updates restore vanilla paks (Store blockmap), changing mtimes -
-    this is the refresh trigger. Costs one stat call per pak (~milliseconds).
-    """
+    """True when any pak's size/mtime changed on disk (game update = refresh trigger)."""
     pcbanks = pcbanks or index["pcbanks"]
     for pak, info in index["paks"].items():
         p = os.path.join(pcbanks, pak)

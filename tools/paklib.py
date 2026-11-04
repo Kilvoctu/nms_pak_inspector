@@ -1,32 +1,4 @@
-"""Minimal HGPAK v2 (Windows) pak reader and targeted injector.
-
-Format (verified against live PCBANKS data and hgpaktool):
-
-    0x00  5s   magic "HGPAK"
-    0x08  Q    version (=2)
-    0x10  Q    file_count (includes the filepath-data pseudo-entry: real+1)
-    0x18  Q    chunk_count
-    0x20  ?    compress flag (1 = zstd chunks)
-    0x28  Q    data_offset
-    0x30  16s  pak name hash
-    0x40  QQ   data_offset (again), filepath_data_len
-    0x50  ...  per-file entries, 0x20 bytes each:
-               16s md5(path as posix string, utf-8)
-               Q    file offset (absolute, data region included)
-               Q    file size
-    then (if compressed) the chunk index: chunk_count * Q (compressed sizes)
-
-Data region: the filepath-data blob (entry 0) followed by every file,
-concatenated, each padded with zeros to a 0x10 boundary. The padded stream is
-cut into independent 0x10000-byte windows, each zstd-compressed (store_size
-off); the last window may be shorter. Chunk storage is padded to 0x10 bytes.
-
-``inject()`` rewrites a pak with only the changed windows recompressed:
-windows whose bytes are unaffected by the change are copied compressed-
-verbatim from the source pak. When a change shifts the stream layout (file
-size growth), the shifted tail is rebuilt from the new file bytes at a fast
-zstd level; windows overlapping actual changes always use the quality level.
-"""
+"""Minimal HGPAK v2 (Windows) pak reader and targeted injector (full format spec in AGENTS.md)."""
 
 import bisect
 import hashlib
@@ -208,21 +180,9 @@ def inject(
     bulk_level: int = BULK_LEVEL,
     full_check: bool = False,
 ) -> dict:
-    """Rewrite `source` pak with `changes` applied into `out`.
+    """Rewrite `source` pak with `changes` applied into `out` (no new files: full re-chunk).
 
-    changes maps stored file paths to their new full contents (files must
-    already exist in the pak; appending new files is supported but forces a
-    full re-chunk because the filepath data blob grows).
-
-    Performance: windows whose bytes are unaffected are copied compressed-
-    verbatim from the source. When no file is added and every changed file's
-    padded size is unchanged (always true for reverts), the layout after the
-    change is identical to the source, so *all* unaffected windows - not just
-    the ones before the change - are copied verbatim. When a change shifts
-    the layout, the shifted tail is rebuilt at ``bulk_level`` (fast), while
-    windows overlapping changed bytes use ``level`` (quality). Returns stats
-    about the operation.
-    """
+    Untouched windows copy compressed-verbatim (layout unchanged); a shifted tail re-chunks at ``bulk_level``."""
     src = Pak(source)
     names = list(src.filenames)
     added = [n for n in changes if n not in src.file_map]
@@ -238,10 +198,8 @@ def inject(
             files.append((n, None, src.file_map[n][2]))
 
     fp_same = fp_new == src.filepath_data
-    # Same-layout fast path: identical filepath blob, no added files, and
-    # every changed file occupies its original padded slot. Then all stream
-    # positions are unchanged and any window without changed bytes equals a
-    # source window byte-for-byte.
+    # Same-layout fast path: identical filepath blob + unchanged padded slots,
+    # so all stream positions hold and untouched windows equal source windows.
     layout_identical = (
         fp_same
         and not added
@@ -349,8 +307,8 @@ def inject(
             for size in sizes_written:
                 fo.write(struct.pack("<Q", size))
 
-    # Self-check: changed/added files are read back byte-exactly; unchanged
-    # files are verbatim (or stream) copies whose machinery the tests cover.
+    # Self-check: changed/added files read back byte-exactly; unchanged files
+    # are verbatim (or stream) copies.
     check = Pak(out)
     try:
         if check.filenames != names:

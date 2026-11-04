@@ -1,21 +1,6 @@
-"""Resolve which vanilla pak each file in a loose-file mod zip belongs to.
+"""Resolve which vanilla pak each loose-file mod entry belongs to (md5 lookup against the index).
 
-Takes one or more mod zips (the loose-file format: partial EXMLs in a folder
-tree), derives the candidate game paths for each file, and looks them up in
-the pak index built by index_paks.py. Lookup is a pure md5-hash check, so a
-whole mod resolves in microseconds once the index is loaded.
-
-Candidate forms tried per mod file (first hit wins):
-  1. as-shipped path (e.g. GLOBALS/gcskyglobals.globals.EXML)
-  2. extension swapped to the game format (.EXML/.MXML -> .MBIN), plus
-     upper/lower variants of both full path and bare filename
-  3. bare filename variants (some paks store no directory structure)
-
-Usage:
-    python -m tools.locate_mod "Personal - 72 Minute Days.zip" [more.zips...]
-
-Exit code 1 if any file could not be resolved (new files are expected to
-resolve - they become new pak entries - but path-form misses deserve a look).
+Usage: python -m tools.locate_mod "Mod.zip" [more.zips...] (exit 1 on unresolved paths)
 """
 import argparse
 import glob as globmod
@@ -53,9 +38,8 @@ def candidate_forms(name: str) -> list:
     for s in (n, base):
         add(s.upper())
         add(s.lower())
-    # The game's loose loader implicitly maps mod files into METADATA\ when the
-    # shipped path doesn't already carry a game-root prefix - some mod authors
-    # omit it. Try the METADATA-prefixed forms last (both prefix cases).
+    # Loose loader maps mod files into METADATA\ when the path lacks a game-root
+    # prefix (some authors omit it) - try METADATA-prefixed forms last.
     if not n.lower().startswith(("metadata/", "models/", "textures/", "sound/")):
         # add() appends to cands while iterating: the list() copy is REQUIRED
         # (ruff PERF101 wants it gone - do not "fix").
@@ -110,10 +94,7 @@ def mod_entries(path: str) -> list[str]:
 
 
 def locate_zip(zip_path: str, hashmap: dict):
-    """Resolve every game file in a mod (zip or loose folder).
-
-    Returns (unresolved_count, resolved_paths); the caller aggregates
-    across mods."""
+    """Resolve every game file in a mod; returns (unresolved_count, resolved_paths)."""
     unresolved = 0
     resolved_paths = []
     print(f"\n=== {os.path.basename(zip_path)} ===")

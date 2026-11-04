@@ -1,24 +1,4 @@
-"""Bake mods into the game's paks, with pre-image backups.
-
-Single-mod injection (``inject_mod``) and N-way group injection
-(``inject_group`` - mods sharing pak paths get their edits merged into one
-content per path) share the same pipeline per affected pak:
-
-  1. Snapshot the current bytes of every entry about to be overwritten
-     (``inject_backups/``) - "Revert" writes them back.
-  2. ``paklib.inject`` rewrites the pak into a temp file (efficient: chunks
-     before the first change are copied verbatim), self-checking the result.
-  3. The temp file atomically replaces the real pak.
-  4. The pak index's size/mtime record for that pak is refreshed so the
-     app's own injection never looks like a game update (which would
-     trigger an index rebuild and poison the vanilla reference cache).
-
-State (``inject_state.json``) maps mod name -> {"order", "injected_at",
-"files": [{"pak", "stored", "rel", "backup"}]}. Group members each reference
-the group event's backups. Reverting restores the pre-images and then
-re-injects the *merged* content of the still-injected mods over the
-reverted paths, so chains stay consistent.
-"""
+"""Bake mods into the game's paks with pre-image backups and byte-exact revert (see inject)."""
 
 import hashlib
 import json
@@ -53,10 +33,7 @@ def save_state(state: dict) -> None:
 
 
 def clear_state() -> None:
-    """Forget all injections and delete the pre-image backups.
-
-    Used when the game updated (the paks on disk are vanilla again, so the
-    backups no longer describe anything real)."""
+    """Forget all injections and delete pre-image backups (game updated = vanilla again)."""
     STATE_FILE.unlink(missing_ok=True)
     shutil.rmtree(BACKUP_DIR, ignore_errors=True)
 
@@ -121,9 +98,7 @@ def _swap_pak(pak_path: Path, changes: dict[str, bytes], log) -> dict:
 
 
 def _refresh_index(index: dict, pak_name: str, pak_path: Path) -> None:
-    """Keep the index's size/mtime records in step with our own injection.
-
-    ``generated`` (the vanilla cache key) must NOT change here."""
+    """Track our own injection in the index (``generated`` cache key must NOT change)."""
     info = index.get("paks", {}).get(pak_name)
     if info is not None:
         st = os.stat(pak_path)
@@ -231,9 +206,7 @@ def inject_mod(mod, index: dict, pcbanks: str, log) -> dict:
 
 def revert_mod(mod_name: str, scan: dict, index: dict, pcbanks: str, log,
                reapply: bool = True) -> dict:
-    """Restore a mod's pre-injection bytes. With ``reapply`` (the default),
-    other still-injected mods sharing the reverted pak paths are re-injected
-    in injection order so their edits survive."""
+    """Restore pre-injection bytes; ``reapply`` re-injects other mods sharing those paths."""
     state = load_state()
     entry = state.pop(mod_name, None)
     if entry is None:
@@ -269,12 +242,7 @@ def revert_mod(mod_name: str, scan: dict, index: dict, pcbanks: str, log,
 
 
 def revert_all(scan: dict, index: dict, pcbanks: str, log) -> dict:
-    """Revert every injected mod, newest first.
-
-    Reverting in reverse injection order unwinds the pre-image chain
-    perfectly: each snapshot holds exactly the content that preceded that
-    injection, so the final state is exact vanilla. Re-apply is suppressed -
-    everything is going anyway."""
+    """Revert every injected mod newest-first (reverse order unwinds the chain to exact vanilla)."""
     state = load_state()
     names = sorted(state, key=lambda n: state[n].get("order", 0), reverse=True)
     for name in names:
@@ -288,9 +256,7 @@ def revert_all(scan: dict, index: dict, pcbanks: str, log) -> dict:
 
 def _merged_content(participants: list, van_root, work: Path, resolutions,
                     log) -> bytes:
-    """Merged MBIN bytes for one pak path from several mods' trees.
-
-    ``participants`` is a list of (mod, hit)."""
+    """Merged MBIN bytes for one pak path; ``participants`` is [(mod, hit)]."""
     mod_roots = [
         _parse_mod_tree(
             hit.entry, _read_mod_data(mod, hit.entry), work, log
@@ -310,11 +276,7 @@ def _merged_content(participants: list, van_root, work: Path, resolutions,
 
 def merge_preview(mod_names: list[str], scan: dict, index: dict, pcbanks: str,
                   log) -> dict:
-    """Compute what a group injection WOULD do - no injection, no state.
-
-    Returns {"mod_names": [...], "files": {"pak|stored": {
-        "pak", "stored", "participants": [names], "conflicts": [MergeConflict],
-        "mod_roots": [...], "van_root", "merged_root", "notes"}}}."""
+    """Compute what a group injection WOULD do (no injection, no state)."""
     mods = []
     for name in mod_names:
         mod = next((m for m in scan["mods"] if m.name == name), None)
@@ -356,10 +318,7 @@ def merge_preview(mod_names: list[str], scan: dict, index: dict, pcbanks: str,
 
 def inject_group(mod_names: list[str], scan: dict, index: dict, pcbanks: str,
                  resolutions: dict[str, int] | None, log) -> dict:
-    """Inject several mods at once, merging their edits per shared pak path.
-
-    Mods already injected keep their state entries and backups; new members
-    each get an entry referencing the group event's backups."""
+    """Inject several mods at once, merging their edits per shared pak path."""
     state = load_state()
     mods = []
     for name in mod_names:

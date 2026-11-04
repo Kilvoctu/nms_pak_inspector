@@ -1,32 +1,4 @@
-"""Verify loose mods against the actual vanilla data in the game's paks.
-
-For every resolved mod file this performs a *dry-run merge* against the real
-vanilla MBIN:
-
-1. Extract the vanilla MBIN from its pak (chunk-decompress, milliseconds).
-2. Decompile it to MXML with MBINCompiler - cached per
-   (pak, stored path, index build) because many mods touch the same file.
-3. Parse the mod side (EXML directly; shipped MBINs are decompiled too) and
-   diff every changed field against the vanilla property tree.
-
-Per-field verdicts:
-    OK       - field exists, value format compatible (a real change)
-    FORMAT   - field exists but value format differs from vanilla
-               (int vs float - the MBINCompiler crash gotcha; the merge
-               step can auto-fix by reformatting to the vanilla style)
-    MISSING  - field path does not exist in the current game build
-               (the mod is outdated for this game version)
-    NO-OP    - list directive whose target doesn't exist in vanilla
-               (removal of an absent entry): the edit lands on nothing
-    TEMPLATE - root template name differs from vanilla (hard error)
-
-Per-file status:
-    VERIFIED    - every key the mod references exists; edits apply
-    NO_EFFECT   - every edit is a no-op (all values equal vanilla, or all
-                  directives target entries vanilla no longer has): the
-                  mod was written for an older game and does nothing here
-    FORMAT / OUTDATED / ERROR
-"""
+"""Verify loose mods against the actual vanilla data (a dry-run merge per file; see verdicts below)."""
 
 import hashlib
 import re
@@ -103,20 +75,9 @@ def _value_class(value: str | None) -> str:
 
 def _diff_children(mod_props, van_props, path: str, issues: list[FieldIssue],
                    stats: dict | None = None) -> None:
-    """Match mod children against vanilla children.
+    """Match mod children against vanilla children (keep in sync with merge_mods).
 
-    Pairing priority per mod child:
-      1. ``_id`` attribute -> the vanilla sibling with the same ``_id`` (key
-         match). Missing = the mod references an entry vanilla doesn't have.
-      2. ``_index`` attribute -> the vanilla sibling at that position (vanilla
-         MXML decorates repeated entries with ``_index``). Missing position =
-         the mod inserts a new list entry.
-      3. otherwise -> per-name positional consumption (fallback).
-
-    ``_remove`` marks a deletion directive: it pairs like any other child but
-    reports a removal row instead of a value diff. ``stats`` (when given)
-    accumulates ``same`` - the count of values identical to vanilla - so the
-    caller can detect files whose every edit is a no-op."""
+    Pairing: ``_id`` -> ``_index`` (missing = insertion) -> positional; ``_remove`` reports a removal row."""
     van_by_name: dict[str | None, list] = {}
     van_by_id: dict[tuple[str | None, str], object] = {}
     van_by_index: dict[tuple[str | None, str], object] = {}
@@ -252,10 +213,7 @@ def _leaf_value(prop) -> str | None:
 
 @dataclass
 class EditorRow(FieldIssue):
-    """One row of the mod editor's field tables.
-
-    Extends FieldIssue with the actual tree elements so the editor can edit
-    values and apply structural directives in place."""
+    """One editor field-table row: FieldIssue plus the mod/vanilla Elements."""
 
     mod_elem: object = None  # the mod-side Element (edit target)
     van_elem: object = None  # the vanilla-side Element (reference)
@@ -263,11 +221,7 @@ class EditorRow(FieldIssue):
 
 
 def iter_field_rows(mod_root, van_root) -> list[EditorRow]:
-    """Enumerate EVERY field of the mod tree paired against vanilla.
-
-    Unlike ``_diff_children`` (which reports only changes), this includes
-    unchanged fields (V_SAME) so the editor can review the complete file.
-    Pairing mirrors ``_diff_children`` - keep the two in sync."""
+    """Every mod field paired against vanilla (unchanged ones too, for the editor)."""
     rows: list[EditorRow] = []
     _iter_children(list(mod_root.findall("Property")),
                    list(van_root.findall("Property")), "", rows)
@@ -390,9 +344,7 @@ def _iter_children(mod_props, van_props, path: str, rows: list[EditorRow]) -> No
 
 
 def is_raw_asset(entry: str) -> bool:
-    """True for game files that are not MBIN/XML (textures, shaders, audio,
-    ...): they carry no property tree, so verification byte-compares them
-    and the UI shows a raw-asset inspector instead of the field editor."""
+    """True for non-MBIN/XML files (textures, shaders...): byte-compared, no field editor."""
     return not entry.lower().endswith((".mbin", ".exml", ".mxml"))
 
 
@@ -446,11 +398,9 @@ def _read_mod_data(mod, entry: str) -> bytes:
 
 
 def _duplicate_groups(mod_root) -> dict[int, int]:
-    """Map id(element) -> group size for same-name sibling properties repeated
-    within one parent (duplicated struct fields from hand edits).
+    """Map id(element) -> group size for same-name siblings repeated in one parent.
 
-    Legitimate list entries are not flagged: those groups all carry
-    ``_index`` (positional) or ``_id`` (keyed) attributes."""
+    Legitimate list entries (with ``_index``/``_id`` attributes) are not flagged."""
     groups: dict[int, int] = {}
     for parent in mod_root.iter():
         by_name: dict[str, list] = {}
@@ -498,15 +448,9 @@ def _duplicate_fields_note(mod_root) -> str:
 
 
 def verify_scan(scan: dict, index: dict, log, only_mod: str | None = None) -> dict:
-    """Verify every resolved mod file in a scan result.
+    """Verify every resolved mod file; ``only_mod`` restricts to one mod (recompute totals!).
 
-    With ``only_mod`` set, only that mod's files are verified (the counts
-    then cover just those files - callers merging into a full result must
-    recompute totals themselves).
-
-    Returns {"verifications": {(mod_name, entry): FileVerification},
-             "counts": {...}}.
-    """
+    Returns {"verifications": {(mod, entry): FileVerification}, "counts": {...}}."""
     pcbanks = index["pcbanks"]
     compiler = mbincompiler.ensure_compiler()
     verifications: dict[tuple[str, str], FileVerification] = {}

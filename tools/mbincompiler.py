@@ -1,16 +1,4 @@
-"""MBINCompiler manager: acquire, version, and run the compiler.
-
-The app owns a single managed folder (``<project>/mbincompilers/``) and never
-scans the user's machine. Compilers come from the MBINCompiler GitHub repo
-(https://github.com/monkeyman192/MBINCompiler), whose releases are tagged per
-game version (e.g. ``v7.10.0-pre1``). Policy: use the newest release whose
-version is <= the detected game version - older compilers keep working for
-any template the game update didn't change.
-
-The compiler exe is a self-contained .NET single-file build (libMBIN bundled);
-the only external requirement is the .NET 8 x64 Desktop Runtime. It writes a
-``<exename>.log`` next to itself on every run, which self-reports its version.
-"""
+"""MBINCompiler manager: acquire, version, and run the compiler (newest release <= game version)."""
 
 import json
 import re
@@ -49,10 +37,7 @@ _GAME_VERSION_QUERIED = False
 
 
 def game_version() -> tuple[int, ...] | None:
-    """Detected NMS version, e.g. (7, 12, 0, 0) - MS Store package version.
-
-    Cached after the first query (the PowerShell call is slow); a failed
-    detection is also cached (returns None without re-querying)."""
+    """Detected NMS version, e.g. (7, 12, 0, 0); cached (failures cached too)."""
     global _GAME_VERSION_CACHE, _GAME_VERSION_QUERIED
     if _GAME_VERSION_QUERIED:
         return _GAME_VERSION_CACHE
@@ -101,11 +86,19 @@ def _exe_log_version(exe: Path) -> str | None:
 
 
 def local_compilers() -> list[dict]:
-    """Downloaded compilers: [{'tag', 'version', 'exe'}...] newest first."""
+    """Downloaded compilers: [{'tag', 'version', 'exe'}...] newest first.
+
+    Stale exe paths (project folder moved/renamed) self-heal to the managed
+    folder, since the inventory stores absolute paths."""
     inv = _load_inventory()
     out = []
     for c in inv.get("compilers", []):
         exe = Path(c["exe"])
+        if not exe.exists():
+            relocated = MANAGED_DIR / exe.name
+            if relocated.exists():
+                exe = relocated
+                c = {**c, "exe": str(relocated)}
         if exe.exists():
             out.append(c)
     out.sort(key=lambda c: parse_tag(c["tag"]) or (0,), reverse=True)
@@ -116,11 +109,7 @@ def local_compilers() -> list[dict]:
 
 
 def list_remote_releases(force: bool = False) -> list[dict]:
-    """All releases: [{'tag', 'version', 'asset_url'}...] (newest first).
-
-    Uses a small disk cache unless ``force`` (the GUI's manual re-check) or
-    the cache is older than the TTL. On fetch failure a stale cache is still
-    returned (better than nothing during rate limits / offline)."""
+    """All releases: [{'tag', 'version', 'asset_url'}...] (newest first, disk-cached 6 h)."""
     now = time.time()
     if not force and RELEASE_CACHE.exists():
         try:
@@ -208,9 +197,7 @@ def download(release: dict) -> dict:
 
 
 def ensure_compiler(game: tuple[int, ...] | None = None) -> dict:
-    """Newest usable compiler: download from the repo if none is good enough.
-
-    Returns the inventory entry of the selected compiler."""
+    """Newest usable compiler: download from the repo if none is good enough."""
     game = game or game_version()
     local = local_compilers()
     if local:

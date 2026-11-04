@@ -1,9 +1,4 @@
-"""Background task workers for the NMS Pak Inspector GUI.
-
-``TaskWorker`` runs a plain function on a ``QThread`` so the GUI never blocks;
-the function receives a ``log`` callable as its first argument and its return
-value is delivered through the ``done(object)`` signal.
-"""
+"""Background task workers: TaskWorker runs fn(log, *args) on a QThread, result via done(object)."""
 
 import json
 import os
@@ -21,6 +16,7 @@ from .. import (
     install_mods,
     locate_mod,
     mbincompiler,
+    nexus,
     verify_mods,
 )
 
@@ -67,11 +63,7 @@ class ModScan:
 
 
 class TaskWorker(QThread):
-    """Run ``fn(log, *args)`` in the background and report the outcome.
-
-    Signals are emitted from the worker thread; Qt's queued connections
-    deliver them on the GUI thread of the connected receiver.
-    """
+    """Run ``fn(log, *args)`` in the background; signals deliver to the GUI thread."""
 
     log = Signal(str)
     done = Signal(object)
@@ -107,15 +99,9 @@ _GAME_TOP_DIRS = {"GLOBALS", "MODELS", "TEXTURES", "SCRIPTS", "SOUND", "ANIMATIO
 
 
 def _zip_wrapper_name(zip_path: Path) -> str | None:
-    """The single top-level folder inside a zip, if the archive has one.
+    """The single top-level folder inside a zip (Nexus-style wrapper = better display name).
 
-    Nexus-style downloads are wrapped in a folder named after the mod (e.g.
-    ``Diablos_Galaxy_Map/…``) - that inner name is a better display name than
-    the download filename. Returns None when entries sit at the zip root, in
-    several folders, or under a game-content dir (GLOBALS, MODELS, ...).
-
-    Loose non-game files at the zip root (AMUMSS .lua scripts, readme .txt
-    files, ...) are ignored - the scanner skips them anyway."""
+    None at zip root (except loose .lua/.txt), multiple folders, or game-content dirs."""
     tops: set[str] = set()
     try:
         with ZipFile(zip_path) as z:
@@ -145,20 +131,9 @@ def _zip_wrapper_name(zip_path: Path) -> str | None:
 def _mod_sources(
     mods_dir: Path, keep_both: list[list[str]] | None = None
 ) -> list[tuple[Path, str, str, list[str]]]:
-    """Enumerate mods: top-level *.zip files and top-level folders.
+    """Enumerate mods (zips + folders); returns (root, display_name, kind, superseded_zips).
 
-    Returns (root, display_name, kind, superseded_zips). A folder that
-    contains exactly one subdirectory (an extracted zip's wrapper folder)
-    unwraps into it, unless that single child is a game-content folder. A zip
-    whose entries all live under one top-level folder is named after that
-    inner folder (falling back to the zip filename when that name is taken
-    or unusable).
-
-    Two zips sharing an inner folder are versions of one mod: the newest
-    (by file mtime) takes the inner name as its identity and the older
-    archives are reported as superseded. ``keep_both`` holds zip-filename
-    pairs the user chose to keep as separate mods - those skip the supersede
-    and the older archive keeps its own (archive-name) identity."""
+    Zips are named by their inner folder; same-inner zips are versions of one mod (newest wins; ``keep_both`` exempt)."""
     sources: list[tuple[Path, str, str, list[str]]] = []
     if not mods_dir.is_dir():
         return sources
@@ -254,10 +229,7 @@ def _mod_entries(root: Path, kind: str) -> list[str]:
 def scan_mods_worker(
     log, mods_dir: str, index: dict, keep_both: list | str | None = None
 ) -> dict:
-    """Resolve every mod (zip or loose folder) in the mods folder.
-
-    ``keep_both`` (raw QSettings value) lists zip-filename pairs the user
-    chose to keep as separate mods instead of replacing the older archive."""
+    """Resolve every mod (zip or loose folder); ``keep_both`` = pairs kept as separate mods."""
     if isinstance(keep_both, str):
         keep_both = json.loads(keep_both) if keep_both else []
     hashmap = index_paks.build_hashmap(index)
@@ -309,19 +281,12 @@ def scan_mods_worker(
 
 
 def verify_worker(log, scan: dict, index: dict, only_mod: str | None = None) -> dict:
-    """Verify every resolved mod file against the vanilla pak data.
-
-    With ``only_mod`` set, verify just that mod (targeted post-save refresh)."""
+    """Verify every resolved mod file (``only_mod`` = targeted post-save refresh)."""
     return verify_mods.verify_scan(scan, index, log, only_mod=only_mod)
 
 
 def compiler_status_worker(log, force: bool = False) -> dict:
-    """Game version, newest local compiler, and the release the update policy
-    would select (newest MBINCompiler release <= game version).
-
-    Network/PowerShell failures are reported in the result, not raised, so the
-    GUI always gets version info to display. ``force`` bypasses the release
-    cache (the GUI's manual re-check)."""
+    """Game version + newest local/remote compiler (failures reported, not raised)."""
     game = mbincompiler.game_version()
     local = mbincompiler.local_compilers()
     result: dict = {
@@ -450,4 +415,21 @@ def inject_all_worker(log, names: list, scan: dict, index: dict, pcbanks: str,
         f"{totals['groups']} merged group(s), {len(totals['skipped'])} skipped"
     )
     return totals
+
+
+def nexus_info_worker(log, api_key: str, source_path: str) -> dict:
+    """Fetch Nexus metadata for one mod archive; errors reported in the result."""
+    parsed = nexus.parse_nexus_filename(source_path)
+    if parsed is None:
+        return {"parsed": None}
+    mod_id = parsed["mod_id"]
+    log(f"Fetching Nexus info for mod {mod_id}…")
+    result: dict = {"parsed": parsed, "mod": None, "latest": None}
+    try:
+        result["mod"] = nexus.fetch_mod(mod_id, api_key)
+        files = nexus.fetch_files(mod_id, api_key)
+        result["latest"] = nexus.latest_file(files)
+    except Exception as exc:  # noqa: BLE001 - shown in the dialog
+        result["error"] = friendly_error(exc)
+    return result
 

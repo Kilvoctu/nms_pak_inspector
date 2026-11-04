@@ -1,19 +1,4 @@
-"""Field-level conflict detection between mods that share a pak path.
-
-A path collision (two mods shipping the same MBIN) is only yellow - the mods
-may edit disjoint fields and merge cleanly. This module inspects the
-per-mod verification data (each mod's changed fields) and classifies the
-shared edits:
-
-    CONFLICT   - same field, different values: the mods genuinely fight
-    DUPLICATE  - same field, identical values: harmless, merge dedupes
-    AMBIGUOUS  - repeated-name fields (arrays of same-named properties):
-                 positional matching is unreliable, so we flag "possible
-                 conflict" rather than guess
-
-Mods whose verification errored (e.g. template mismatch) have unknown field
-edits and are excluded from the comparison.
-"""
+"""Field-level conflict detection between mods sharing a pak path (see K_* docs below)."""
 
 from dataclasses import dataclass, field
 
@@ -33,10 +18,7 @@ class FieldConflict:
 
 
 def compute_field_conflicts(scan: dict, verifications: dict) -> list[FieldConflict]:
-    """Cross-reference per-mod changed fields on every collided pak path.
-
-    Returns conflicts sorted: real conflicts first, then ambiguous, then
-    duplicates."""
+    """Cross-reference per-mod changed fields on every collided pak path (sorted by severity)."""
     # stored -> field path -> mod name -> [values] (a mod may edit a
     # repeated-name field several times)
     edits: dict[str, dict[str, dict[str, list[str | None]]]] = {}

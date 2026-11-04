@@ -1,26 +1,4 @@
-"""Apply a mod's file deltas to the vanilla data and produce MBIN bytes.
-
-The writing counterpart of verify_mods (which only dry-runs): this performs
-the real merge a pak injection needs. The vanilla tree is the base; the
-mod's edits are applied onto a deep copy of it, so anything the mod doesn't
-touch keeps its vanilla value.
-
-Pairing rules mirror ``verify_mods._diff_children`` (keep the two in sync):
-  1. ``_id`` attribute  -> the vanilla sibling with the same ``_id``.
-     Missing = the mod references an entry vanilla doesn't have: hard error.
-  2. ``_index`` attribute -> the vanilla sibling at that position. Missing
-     position = insertion (the mod's entry is copied into the list) - or a
-     no-op when combined with ``_remove``.
-  3. otherwise -> per-name positional consumption (fallback).
-
-``_remove`` deletes the paired vanilla entry from the merged tree.
-
-Auto-fixes applied while merging (the MBINCompiler crash gotchas):
-  - FORMAT: a value written in a different numeric style than vanilla is
-    rewritten in vanilla's style (int <-> 6-decimal float).
-  - TEMPLATE: a root template name that differs from vanilla is corrected to
-    vanilla's (the game's template names are authoritative).
-"""
+"""Apply a mod's file deltas onto the vanilla tree (pairing rules mirror verify_mods._diff_children)."""
 
 import copy
 import xml.etree.ElementTree as ET
@@ -48,9 +26,7 @@ def _conform_value(mod_value: str | None, van_value: str | None) -> str | None:
 
 
 def merge_tree(mod_root: ET.Element, van_root: ET.Element) -> tuple[ET.Element, list[str]]:
-    """Merge the mod tree onto a copy of the vanilla tree.
-
-    Returns (merged_root, notes) - notes are human-readable auto-fixes."""
+    """Merge the mod tree onto a copy of the vanilla tree; returns (merged_root, notes)."""
     notes: list[str] = []
     merged = copy.deepcopy(van_root)
     mod_template = mod_root.get("template") if mod_root.tag == "Data" else None
@@ -69,11 +45,7 @@ def merge_tree(mod_root: ET.Element, van_root: ET.Element) -> tuple[ET.Element, 
 
 def _apply_children(mod_props, van_props, parent: ET.Element,
                     edits: list | None = None, path: str = "") -> None:
-    """Apply the mod's edits onto ``parent``'s vanilla children (in place).
-
-    With ``edits`` (a list), every value change appends an edit record
-    ``(element, path, old, new)`` - merge_many uses these to detect and
-    resolve cross-mod conflicts by element reference."""
+    """Apply the mod's edits onto ``parent``'s vanilla children; with ``edits``, record changes."""
     van_by_name: dict[str | None, list] = {}
     van_by_id: dict[tuple[str | None, str], ET.Element] = {}
     van_by_index: dict[tuple[str | None, str], ET.Element] = {}
@@ -163,15 +135,7 @@ class MergeConflict:
 def merge_many(mod_roots: list, van_root: ET.Element,
                resolutions: dict[str, int] | None = None,
                ) -> tuple[ET.Element, list[str], list[MergeConflict]]:
-    """Merge several mods onto one copy of the vanilla tree.
-
-    Mods apply in list order; structural directives (insertions, removals)
-    compose naturally. Fields that multiple mods set to *different* values
-    are conflicts: ``resolutions`` maps field path -> winning mod index, and
-    the default (no entry) is first-wins.
-
-    Returns (merged_root, notes, conflicts) - ``conflicts`` describes every
-    multi-mod field with all choices, resolved or not."""
+    """Merge several mods onto one vanilla copy; ``resolutions`` maps field path -> winner."""
     merged = copy.deepcopy(van_root)
     notes: list[str] = []
     for i, mod_root in enumerate(mod_roots):
@@ -222,9 +186,7 @@ def merge_many(mod_roots: list, van_root: ET.Element,
 
 def _insert_entry(parent: ET.Element, entry: ET.Element, name: str | None,
                   position: str) -> None:
-    """Copy a mod list entry into the vanilla parent at the given _index.
-
-    ``_index`` counts same-name siblings, matching the MXML convention."""
+    """Copy a mod list entry into the vanilla parent (``_index`` counts same-name siblings)."""
     same = 0
     insert_at = len(parent)
     for i, child in enumerate(parent):
