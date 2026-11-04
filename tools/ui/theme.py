@@ -159,6 +159,7 @@ QComboBox QAbstractItemView {{
 QMenu {{ background-color: {BG_PANEL}; border: 1px solid {BORDER}; color: {TEXT}; }}
 QMenu::item {{ padding: 4px 22px; }}
 QMenu::item:selected {{ background-color: {SEL_BLOCK}; }}
+QMenu::separator {{ height: 1px; background: #33414a; margin: 4px 10px; }}
 QStatusBar {{
     background: {BG_PANEL};
     border-top: 1px solid rgba(63, 216, 216, 40%);

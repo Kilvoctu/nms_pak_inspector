@@ -74,6 +74,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import (
+    audit_injected,
     index_paks,
     inject_mods,
     install_mods,
@@ -96,6 +97,7 @@ from .worker import (
     FileHit,
     ModScan,
     TaskWorker,
+    audit_worker,
     compiler_status_worker,
     compiler_update_worker,
     fields_prep_worker,
@@ -2357,6 +2359,7 @@ class MainWindow(QMainWindow):
         self._inject_state: dict = {}  # inject_mods state: mod name -> files
         self._injecting_mod: str | None = None  # mod whose inject/revert runs
         self._inject_progress: int | None = None  # re-chunk % for the busy label
+        self._audit_result: dict | None = None  # last audit_injections result
         self._installed_mods: set[str] = set()  # folder names in GAMEDATA\MODS
         self._installing_mod: str | None = None  # mod whose install/remove runs
         self._user_col_widths: dict[int, int] = {}  # widths the user chose
@@ -2561,16 +2564,20 @@ class MainWindow(QMainWindow):
         rescan.triggered.connect(self._scan_mods)
         reindex = menu.addAction("Rebuild pak index")
         reindex.triggered.connect(self._on_rebuild_index)
+        menu.addSeparator()
         self._restore_action = menu.addAction("Restore vanilla")
         self._restore_action.setEnabled(False)
         self._restore_action.triggered.connect(self._on_restore_vanilla)
         self._inject_all_action = menu.addAction("Inject all mods")
         self._inject_all_action.triggered.connect(self._on_inject_all)
+        self._audit_action = menu.addAction("Audit injected mods")
+        self._audit_action.triggered.connect(self._on_audit_action)
         menu.addSeparator()
         expand_all = menu.addAction("Expand all")
         expand_all.triggered.connect(self._tree.expandAll)
         collapse_all = menu.addAction("Collapse all")
         collapse_all.triggered.connect(self._tree.collapseAll)
+        menu.addSeparator()
         open_mods = menu.addAction("Open mods folder")
         open_mods.triggered.connect(self._on_open_mods_folder)
         open_game = menu.addAction("Open game folder")
@@ -3514,6 +3521,11 @@ class MainWindow(QMainWindow):
         else:
             self._restore_action.setEnabled(False)
             self._restore_action.setToolTip("Nothing is injected into the paks")
+        self._audit_action.setEnabled(not busy and bool(self._inject_state))
+        self._audit_action.setToolTip(
+            "Checks every injected file against its pre-injection backup "
+            "(MBIN round-trip, DDS headers, pak integrity) and ranks crash suspects"
+        )
         eligible = self._eligible_mods()
         self._inject_all_action.setEnabled(not busy and bool(eligible))
         self._inject_all_action.setToolTip(
@@ -3851,6 +3863,43 @@ class MainWindow(QMainWindow):
     def _on_restore_done(self, result: dict) -> None:
         self._inject_state = inject_mods.load_state()
         self._fill_tree()  # refreshes button states (nothing injected now)
+
+    def _on_audit_action(self) -> None:
+        if self._worker is not None:
+            return
+        if not self._inject_state:
+            self.append_log("Nothing is injected - nothing to audit")
+            return
+        if not self._log_view.isVisible():
+            self._log_view.setVisible(True)  # findings must never be invisible
+        self._start_task(
+            audit_worker, self._current_pcbanks(), on_done=self._on_audit_done,
+        )
+
+    def _on_audit_done(self, result: dict) -> None:
+        self._audit_result = result
+        for f in result["findings"]:
+            if f["severity"] == "risk":
+                color, tag = COLOR_ERROR, "RISK"
+            elif f["severity"] == "warn":
+                color, tag = theme.COLOR_MERGE, "WARN"
+            elif f["severity"] == "info":
+                color, tag = COLOR_DIM, "INFO"
+            else:
+                color, tag = None, None
+            boot = " [boot-critical]" if audit_injected._boot_critical(f["file"]) else ""
+            line = f"{f['file']}: {f['detail']}{boot}"
+            if f["severity"] == "ok":
+                continue  # summary counts carry the good news; keep the log readable
+            self.append_log(f"[{tag}] {f['mod']} :: {line}", color=color)
+        self.append_log(result["summary"], color=COLOR_DIM)
+        risks = [f for f in result["findings"] if f["severity"] == "risk"]
+        if risks:
+            self.append_log(
+                "Crash suspects: the RISK lines above - revert those mods first "
+                "and boot to confirm (byte-exact revert, no data loss)",
+                color=COLOR_ERROR,
+            )
 
     # --- console ---------------------------------------------------------------
 

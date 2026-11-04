@@ -359,6 +359,14 @@ def revert_mod_worker(log, mod_name: str, scan: dict, index: dict, pcbanks: str)
     return inject_mods.revert_mod(mod_name, scan, index, pcbanks, log)
 
 
+def audit_worker(log, pcbanks: str) -> dict:
+    """Static crash-risk audit of every injected file (background)."""
+    log("Auditing injected files (decompile round-trips, DDS headers, pak integrity)…")
+    from .. import audit_injected
+
+    return audit_injected.audit_injections(pcbanks, log)
+
+
 def install_mod_worker(log, mod_name: str, scan: dict, pcbanks: str) -> dict:
     """Copy one mod's files into the game's loose-mod folder (background)."""
     mod = _find_mod(scan, mod_name)
