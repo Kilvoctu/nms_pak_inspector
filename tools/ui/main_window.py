@@ -6,7 +6,6 @@ import json
 import os
 import re
 import shutil
-import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from zipfile import ZipFile
@@ -34,13 +33,14 @@ from PySide6.QtGui import (
     QFont,
     QFontDatabase,
     QGuiApplication,
+    QIcon,
     QImage,
     QKeySequence,
     QMouseEvent,
     QPainter,
     QPalette,
-    QPen,
     QPixmap,
+    QRadialGradient,
     QShortcut,
     QShowEvent,
 )
@@ -91,6 +91,7 @@ from ..conflicts import (
     FieldConflict,
     compute_field_conflicts,
 )
+from . import theme
 from .worker import (
     FileHit,
     ModScan,
@@ -115,14 +116,15 @@ from .worker import (
 
 # --- identity -----------------------------------------------------------------
 
-COLOR_ACCENT = QColor("#ff9a3c")  # NMS amber: hover tint, busy wash, merge flag
-COLOR_CLEAN = QColor(Qt.GlobalColor.darkGreen)
-COLOR_MERGE = QColor("#c47f00")
-COLOR_UNMATCHED = QColor("#808080")
-COLOR_ERROR = QColor("#c0392b")
-COLOR_DIM = QColor("#808080")
+# Status colors re-point at the theme (semantics unchanged, NMS hues).
+COLOR_ACCENT = theme.COLOR_ACCENT  # cyan: hover tint, busy wash, structure
+COLOR_CLEAN = theme.COLOR_CLEAN
+COLOR_MERGE = theme.COLOR_MERGE
+COLOR_UNMATCHED = theme.COLOR_UNMATCHED
+COLOR_ERROR = theme.COLOR_ERROR
+COLOR_DIM = theme.COLOR_DIM
 
-_TREE_COLUMNS = ["Mod", "Status", "Fields", "Target pak(s)", "Files", "Actions"]
+_TREE_COLUMNS = ["MOD", "STATUS", "FIELDS", "TARGET PAK(S)", "FILES", "ACTIONS"]
 _TREE_COLUMN_WIDTHS = (
     (0, 300), (1, 115), (2, 90), (3, 230), (4, 50), (5, 170),
 )
@@ -229,6 +231,14 @@ class _TitleBar(QWidget):
         layout.setContentsMargins(8, 0, 4, 0)
         layout.setSpacing(6)
 
+        icon_path = repo.app_icon_file()
+        if icon_path.exists():
+            icon_label = QLabel(self)
+            icon_label.setPixmap(
+                QIcon(str(icon_path)).pixmap(18, 18)
+            )
+            layout.addWidget(icon_label)
+
         self._menu_button = QToolButton(self)
         self._menu_button.setObjectName("menuButton")
         self._menu_button.setText("☰")
@@ -240,10 +250,12 @@ class _TitleBar(QWidget):
         self._menu_button.clicked.connect(self._show_menu)
         layout.addWidget(self._menu_button)
 
-        title_label = QLabel("NMS Pak Inspector", self)
+        title_label = QLabel("NMS PAK INSPECTOR", self)
         title_font = title_label.font()
         title_font.setPointSize(10)
         title_font.setBold(True)
+        # Wide tracking, the NMS caps-header signature (not expressible in QSS).
+        title_font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 1.6)
         title_label.setFont(title_font)
         layout.addWidget(title_label)
         layout.addStretch(1)
@@ -334,6 +346,11 @@ class _TitleBar(QWidget):
         """Set the Fluent ChromeRestore (maximized) / ChromeMaximize glyph."""
         self._max_button.setText("\uE923" if self._window.isMaximized() else "\uE922")
 
+    def add_right_info(self, widget) -> None:
+        """Insert a widget at the right edge, left of the window buttons."""
+        lay = self.layout()
+        lay.insertWidget(lay.indexOf(self._min_button), widget)
+
     def set_busy(self, busy: bool) -> None:
         self._busy_count += 1 if busy else -1
         self._busy_count = max(0, self._busy_count)
@@ -352,7 +369,7 @@ class _TitleBar(QWidget):
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
-        painter.fillRect(self.rect(), self.palette().color(QPalette.ColorRole.Window))
+        painter.fillRect(self.rect(), QColor(theme.BG_BASE))
         if self._busy_count > 0:
             # Breathing accent wash: alpha oscillates smoothly between a dim
             # base and a brighter peak so activity reads at a glance.
@@ -364,8 +381,30 @@ class _TitleBar(QWidget):
                 COLOR_ACCENT.red(), COLOR_ACCENT.green(), COLOR_ACCENT.blue(), alpha
             )
             painter.fillRect(self.rect(), accent)
-        painter.setPen(QPen(self.palette().color(QPalette.ColorRole.Mid), 1.0))
-        painter.drawLine(0, self.height() - 1, self.width(), self.height() - 1)
+        # Cyan top-strip with a diagonal cut at the right end, the NMS
+        # resources-bar signature: the line angles down into a short dim tail.
+        cut, drop = 26, 6
+        y = self.height() - 3
+        w = self.width()
+        strip = [
+            QPoint(0, y),
+            QPoint(w - cut, y),
+            QPoint(w, y + drop),
+            QPoint(w, y + drop + 2),
+            QPoint(w - cut, y + 2),
+            QPoint(0, y + 2),
+        ]
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(theme.ACCENT))
+        painter.drawPolygon(strip)
+        painter.setBrush(QColor(theme.BORDER))
+        tail = [
+            QPoint(w, y + drop),
+            QPoint(w - 44, y + drop),
+            QPoint(w - 44, y + drop + 2),
+            QPoint(w, y + drop + 2),
+        ]
+        painter.drawPolygon(tail)
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if event.button() != Qt.MouseButton.LeftButton:
@@ -385,6 +424,44 @@ class _TitleBar(QWidget):
 
 
 # --- collision detail dialog --------------------------------------------------
+
+
+class _AmbientCentral(QWidget):
+    """Central surface: faint NMS ambience (soft glow, dot-matrix) over the window gradient."""
+
+    _dot_tile: "QPixmap | None" = None
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        # One soft magenta glow behind the tree, barely there.
+        glow = QRadialGradient(
+            self.width() * 0.42, self.height() * 0.5,
+            min(self.width(), self.height()) * 0.65,
+        )
+        glow.setColorAt(0.0, QColor(232, 60, 112, 14))
+        glow.setColorAt(1.0, QColor(232, 60, 112, 0))
+        painter.fillRect(self.rect(), QBrush(glow))
+        # Dot-matrix texture in two opposing corners.
+        tile = self._dot_tile or self._make_dot_tile()
+        corner = 190
+        painter.setOpacity(0.5)
+        painter.drawTiledPixmap(
+            self.width() - corner, 0, corner, corner, tile
+        )
+        painter.drawTiledPixmap(0, self.height() - corner, corner, corner, tile)
+        painter.setOpacity(1.0)
+
+    def _make_dot_tile(self) -> QPixmap:
+        """16x16 tile with a single dim dot, cached for tiled fills."""
+        tile = QPixmap(16, 16)
+        tile.fill(Qt.GlobalColor.transparent)
+        p = QPainter(tile)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(63, 216, 216, 26))
+        p.drawRect(0, 0, 1, 1)
+        p.end()
+        _AmbientCentral._dot_tile = tile
+        return tile
 
 
 class _CollisionDialog(QDialog):
@@ -575,19 +652,16 @@ class _RowActionDelegate(QStyledItemDelegate):
         if not label:
             return
         painter.save()
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         if not enabled:
-            fill, border, text = QColor("#2b2b2b"), QColor("#383838"), QColor("#6f6f6f")
-        elif pressed:
-            fill, border, text = QColor("#232323"), QColor("#5a5a5a"), QColor("#e6e6e6")
-        elif hovered:
-            fill, border, text = QColor("#45403a"), COLOR_MERGE, QColor("#f5f5f5")
+            fill, border, text = theme.BG_PANEL, theme.BORDER, "#5a5864"
+        elif pressed or hovered:
+            fill, border, text = "#242030", theme.ACCENT, "#ffffff"
         else:
-            fill, border, text = QColor("#3c3c3c"), QColor("#565656"), QColor("#e6e6e6")
-        painter.setPen(border)
-        painter.setBrush(fill)
-        painter.drawRoundedRect(rect.adjusted(0, 0, -1, -1), 3, 3)
-        painter.setPen(text)
+            fill, border, text = theme.BG_LIFT, "#3a3744", "#e8e6ee"
+        painter.setPen(QColor(border))
+        painter.setBrush(QColor(fill))
+        painter.drawRect(rect.adjusted(0, 0, -1, -1))  # sharp corners, NMS style
+        painter.setPen(QColor(text))
         painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, label)
         painter.restore()
 
@@ -2315,9 +2389,6 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._build_menu()
 
-        if sys.platform == "win32":
-            _apply_rounded_corners(self)
-
         rescan = QShortcut(QKeySequence(Qt.Key.Key_F5), self)
         rescan.activated.connect(self._scan_mods)
 
@@ -2386,7 +2457,7 @@ class MainWindow(QMainWindow):
     # --- UI construction ------------------------------------------------------
 
     def _build_ui(self) -> None:
-        central = QWidget(self)
+        central = _AmbientCentral(self)
         layout = QVBoxLayout(central)
         margins = layout.contentsMargins()
         layout.setContentsMargins(margins.left(), 0, margins.right(), margins.bottom())
@@ -2425,8 +2496,10 @@ class MainWindow(QMainWindow):
 
         self._index_status = QLabel("Index: loading…", central)
         self._mods_status = QLabel("", central)
-        self._version_status = QLabel("", central)
+        self._version_status = QLabel("", self._title_bar)
         self._version_status.setTextFormat(Qt.TextFormat.RichText)
+        self._version_status.setStyleSheet("font-size: 11px;")
+        self._title_bar.add_right_info(self._version_status)
 
         self._tree = QTreeWidget(central)
         self._tree.setColumnCount(len(_TREE_COLUMNS))
@@ -2450,12 +2523,12 @@ class MainWindow(QMainWindow):
         accent = COLOR_ACCENT
         self._tree.setStyleSheet(
             "QTreeWidget::item:hover {"
-            f" background-color: rgba({accent.red()}, {accent.green()}, {accent.blue()}, 40%);"
+            f" background-color: rgba({accent.red()}, {accent.green()}, {accent.blue()}, 10%);"
             " }"
-            # Translucent accent instead of the opaque system Highlight color,
-            # which drowns the per-row status text.
+            # Solid deep-magenta selection block, the NMS way: flat, sharp,
+            # with the per-row status text still readable on top.
             "QTreeWidget::item:selected {"
-            f" background-color: rgba({accent.red()}, {accent.green()}, {accent.blue()}, 30%);"
+            f" background-color: {theme.SEL_BLOCK}; color: white;"
             " }"
         )
         self._tree.setItemDelegate(
@@ -2476,11 +2549,11 @@ class MainWindow(QMainWindow):
 
         self.setCentralWidget(central)
 
-        # Bottom status bar: index, versions (left) · mods summary (right).
+        # Bottom status bar: index (left) · mods summary (right); versions
+        # live in the title bar's right side.
         status_bar = self.statusBar()
         status_bar.setSizeGripEnabled(False)  # custom frameless resize edges
         status_bar.addWidget(self._index_status)
-        status_bar.addWidget(self._version_status)
         status_bar.addPermanentWidget(self._mods_status)
 
         self._browse_btn.clicked.connect(self._on_browse)
@@ -2815,7 +2888,7 @@ class MainWindow(QMainWindow):
         self._verify_counts = self._recompute_verify_counts()
         self._conflicts = compute_field_conflicts(self._scan, self._verifications)
         # Conflict status is shared: any mod on a collided pak path with the
-        # edited mod may flip (e.g. Conflict -> Merge needed), so refresh all.
+        # edited mod may flip (e.g. Conflict -> Merge), so refresh all.
         names = {mod_name}
         mod = next((m for m in self._scan["mods"] if m.name == mod_name), None)
         if mod is not None:
@@ -4066,7 +4139,7 @@ class MainWindow(QMainWindow):
 
 _STATUS_LABEL = {
     ST_CLEAN: "Clean",
-    ST_MERGE: "Merge needed",
+    ST_MERGE: "Merge",
     ST_CONFLICT: "Conflict",
     ST_UNMATCHED: "New/unmatched",
 }
@@ -4122,18 +4195,4 @@ def _wrap_tooltip(text: str, width: int = 70) -> str:
     return "\n".join(wrapped)
 
 
-def _apply_rounded_corners(window: QMainWindow) -> None:
-    import ctypes
-
-    try:
-        dwmapi = ctypes.windll.dwmapi
-        preference = ctypes.c_int(2)  # DWMWCP_ROUND
-        dwmapi.DwmSetWindowAttribute(
-            int(window.winId()),
-            33,  # DWMWA_WINDOW_CORNER_PREFERENCE
-            ctypes.byref(preference),
-            ctypes.sizeof(preference),
-        )
-    except OSError:
-        pass
 

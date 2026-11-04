@@ -3,9 +3,11 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import QLockFile
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication, QMessageBox, QProxyStyle, QStyle
 
 from tools import repo
+from tools.ui import theme
 from tools.ui.main_window import MainWindow
 
 _LOCK_NAME = "nms_pak_inspector.lock"
@@ -34,8 +36,12 @@ def main() -> None:
     sys.setswitchinterval(0.002)
     app = QApplication(sys.argv)
     app.setApplicationName("NMS Pak Inspector")
+    icon = repo.app_icon_file()
+    if icon.exists():
+        app.setWindowIcon(QIcon(str(icon)))  # taskbar + every dialog title bar
     app.setStyle("Fusion")
     app.setStyle(_TooltipDelayStyle(app.style()))
+    theme.apply_theme(app)
 
     lock = QLockFile(str(_lock_dir() / _LOCK_NAME))
     if not lock.tryLock(0):

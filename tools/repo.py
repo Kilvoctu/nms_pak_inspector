@@ -13,6 +13,14 @@ def project_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
+def app_icon_file() -> Path:
+    """The app icon: extracted bundle dir when frozen (onefile), else the project root."""
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass and (Path(meipass) / "icon.ico").exists():
+        return Path(meipass) / "icon.ico"
+    return project_root() / "icon.ico"
+
+
 def state_file() -> Path:
     """GUI/settings file (QSettings INI)."""
     return project_root() / "state.ini"

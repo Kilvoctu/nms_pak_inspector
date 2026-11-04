@@ -1,4 +1,4 @@
-# NMS Pak Inspector
+#  <img src="icon.ico" alt="icon" align="top" width="36"> NMS Pak Inspector
 
 Simple tool that can verify, inspect, and install No Man's Sky mods. This app is built mainly for personal use.
 
