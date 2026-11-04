@@ -1,0 +1,17 @@
+__pycache__/
+.idea/
+.ruff_cache/
+venv/
+mods/
+*.md
+!README.md
+
+# runtime state & caches (machine-specific, rebuilt by the app)
+state.ini
+pak_index.json
+inject_state.json
+inject_backups/
+.cache/
+mbincompilers/
+nms_pak_injector.lock
+ui_selftest.png

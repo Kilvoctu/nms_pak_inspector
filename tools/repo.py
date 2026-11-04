@@ -1,0 +1,110 @@
+"""Project layout: every well-known path in one place.
+
+The app owns its data (settings, index, caches, downloaded compilers) inside
+the project folder and never scans arbitrary user paths.
+"""
+
+import os
+from pathlib import Path
+
+
+def project_root() -> Path:
+    """The nms_pack_injector project folder (parent of this package)."""
+    return Path(__file__).resolve().parent.parent
+
+
+def state_file() -> Path:
+    """GUI/settings file (QSettings INI)."""
+    return project_root() / "state.ini"
+
+
+def index_file() -> Path:
+    """Static path->pak index built by index_paks."""
+    return project_root() / "pak_index.json"
+
+
+def cache_dir() -> Path:
+    """Cache root (decompiled vanilla MXMLs etc.)."""
+    return project_root() / ".cache"
+
+
+def vanilla_cache_dir() -> Path:
+    """Decompiled vanilla MBIN cache, keyed per (pak, path, index build)."""
+    return cache_dir() / "vanilla"
+
+
+def mbincompilers_dir() -> Path:
+    """Managed folder for downloaded MBINCompiler exes."""
+    return project_root() / "mbincompilers"
+
+
+def mods_dir() -> Path:
+    """Default folder holding the user's loose-mod zips/folders."""
+    return project_root() / "mods"
+
+
+def inject_state_file() -> Path:
+    """Persisted injection state: which mods are baked into the paks."""
+    return project_root() / "inject_state.json"
+
+
+def inject_backup_dir() -> Path:
+    """Pre-injection entry snapshots - the revert source of truth.
+
+    Deliberately NOT inside .cache: these are the only copy of the vanilla
+    bytes once a pak has been modified."""
+    return project_root() / "inject_backups"
+
+
+GAME_PACKAGE = "HelloGames.NoMansSky"
+
+
+def appx_install_location() -> str | None:
+    """MS Store install location of the game (works even without a junction).
+
+    Returns the *real* WindowsApps path; slow (PowerShell) - callers cache."""
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            [
+                "powershell", "-NoProfile", "-Command",
+                f"(Get-AppxPackage -Name {GAME_PACKAGE}).InstallLocation",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        location = result.stdout.strip()
+        return location or None
+    except Exception:  # noqa: BLE001 - no Store install / no powershell
+        return None
+
+
+def find_pcbanks(game_dir: str | Path) -> str | None:
+    """Locate the GAMEDATA\\PCBANKS folder under a game install directory.
+
+    Known layouts are tried first (MS Store/Xbox: <game>\\Content\\GAMEDATA\\
+    PCBANKS; Steam/GOG: <game>\\GAMEDATA\\PCBANKS), then a bounded recursive
+    search for any PCBANKS folder that contains .pak files."""
+    game = Path(game_dir)
+    if not game.is_dir():
+        return None
+    candidates = [
+        game / "Content" / "GAMEDATA" / "PCBANKS",
+        game / "GAMEDATA" / "PCBANKS",
+    ]
+    for candidate in candidates:
+        if candidate.is_dir() and any(candidate.glob("*.pak")):
+            return str(candidate)
+    root_depth = len(game.parts)
+    for root, dirs, files in os.walk(game):
+        depth = len(Path(root).parts) - root_depth
+        if depth >= 4:
+            dirs[:] = []  # don't descend deeper
+            continue
+        if Path(root).name.upper() == "PCBANKS" and any(
+            f.lower().endswith(".pak") for f in files
+        ):
+            return root
+    return None
