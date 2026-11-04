@@ -2,8 +2,12 @@
 
 import hashlib
 import json
+import os
 import shutil
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from zipfile import ZipFile
 
 from . import mbincompiler, merge_mods, repo
 from .inject_mods import _vanilla_root
@@ -13,6 +17,8 @@ from .verify_mods import _extract_and_decompile, _parse_mod_tree, _read_mod_data
 MANAGED_FOLDER = "nmspi-managed"
 STATE_FILE = repo.project_root() / "loose_state.json"
 WORK_ROOT = repo.cache_dir() / "_loosework"
+BUILD_CACHE = repo.cache_dir() / "loose_built.json"
+BUILD_VERSION = 1  # bump to force a full regenerate after pipeline changes
 TREE_SUFFIXES = (".mbin", ".exml", ".mxml")
 
 
@@ -29,14 +35,65 @@ def _save_state(state: dict) -> None:
         STATE_FILE.unlink(missing_ok=True)  # keep the project root clean
 
 
+def _load_build_cache() -> dict:
+    if BUILD_CACHE.exists():
+        try:
+            return json.loads(BUILD_CACHE.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+    return {}
+
+
+def _save_build_cache(cache: dict) -> None:
+    if cache:
+        BUILD_CACHE.write_text(json.dumps(cache), encoding="utf-8")
+    else:
+        BUILD_CACHE.unlink(missing_ok=True)
+
+
+def _source_stamps(mods: dict) -> dict:
+    """Cheap per-entry [size, mtime] stamps for every mod source (one zip pass each)."""
+    stamps: dict[str, dict] = {}
+    for name, mod in mods.items():
+        path = Path(mod.path)
+        entry_stamps: dict = {}
+        if path.is_dir():
+            for hit in mod.game_files:
+                try:
+                    st = (path / hit.entry).stat()
+                    entry_stamps[hit.entry] = [st.st_size, int(st.st_mtime)]
+                except OSError:
+                    entry_stamps[hit.entry] = None
+        else:
+            try:
+                with ZipFile(path) as z:
+                    infos = {i.filename: i for i in z.infolist()}
+                for hit in mod.game_files:
+                    info = infos.get(hit.entry)
+                    entry_stamps[hit.entry] = (
+                        [info.file_size, list(info.date_time)] if info else None
+                    )
+            except (OSError, RuntimeError):
+                entry_stamps = {h.entry: None for h in mod.game_files}
+        stamps[name] = entry_stamps
+    return stamps
+
+
+def _target_fingerprint(parts: list, stamps: dict, index: dict) -> dict:
+    """Identity of one target's content: contributor list + source stamps + index build."""
+    contribs = [
+        [order, name, hit.entry, stamps.get(name, {}).get(hit.entry)]
+        for order, name, hit, _rel, _is_tree in parts
+    ]
+    return {"v": BUILD_VERSION, "index": index.get("generated"), "contribs": contribs}
+
+
 def managed_dir(pcbanks: str) -> Path:
     return Path(pcbanks).parent / "MODS" / MANAGED_FOLDER
 
 
 def disablemods_flag() -> Path | None:
     """The game's global 'all loose mods disabled' flag, if locatable."""
-    import os
-
     base = os.environ.get("APPDATA")
     if not base:
         return None
@@ -56,6 +113,7 @@ def installed_names(pcbanks: str) -> set[str]:
 def remove_all(pcbanks: str, log) -> dict:
     """Wipe the managed folder and forget the manifest."""
     _save_state({})
+    _save_build_cache({})
     managed = managed_dir(pcbanks)
     if managed.exists():
         shutil.rmtree(managed)
@@ -106,7 +164,8 @@ def _loose_path(hit) -> tuple[str, bool]:
 
 def rebuild(scan: dict, index: dict, pcbanks: str, log) -> dict:
     """Regenerate the managed folder from the manifest (built aside, then swapped in).
-    Shared target paths merge onto vanilla into one MBIN (first-wins); raw-file conflicts raise."""
+    Unchanged targets are copied over; changed ones generate in parallel; shared paths merge."""
+    started = time.monotonic()
     state = _load_state()
     mods = {m.name: m for m in scan["mods"]}
     shutil.rmtree(WORK_ROOT, ignore_errors=True)
@@ -124,27 +183,81 @@ def rebuild(scan: dict, index: dict, pcbanks: str, log) -> dict:
             key = rel.lower()
             groups.setdefault(key, []).append((entry.get("order", 0), name, hit, rel, is_tree))
 
+    stamps = _source_stamps(mods)
+    cache = _load_build_cache()
     managed = managed_dir(pcbanks)
     building = managed.parent / f"{MANAGED_FOLDER}.building"
     if building.exists():
         shutil.rmtree(building)
     building.mkdir(parents=True)
 
-    written = 0
-    for key, parts in sorted(groups.items()):
+    reuse, generate = [], []
+    for key, parts in groups.items():
         parts.sort()  # manifest order = deterministic merge/first-wins order
-        _order, _name, _hit, rel, _is_tree = parts[0]
-        target = building / rel
+        fp = _target_fingerprint(parts, stamps, index)
+        old = managed / parts[0][3]
+        if cache.get(key) == fp and old.is_file():
+            reuse.append((key, parts, old))
+        else:
+            generate.append((key, parts, fp))
+
+    # Warm the vanilla decompile cache serially (its writes are not race-safe).
+    for _key, parts, _fp in generate:
+        _warm_vanilla(parts, index, pcbanks, log, compiler)
+
+    written = 0
+    for _key, parts, old in reuse:
+        target = building / parts[0][3]
         target.parent.mkdir(parents=True, exist_ok=True)
-        data = _content_for_group(key, parts, mods, index, pcbanks, WORK_ROOT, log, compiler)
-        target.write_bytes(data)
+        shutil.copy2(old, target)
         written += 1
+    if generate:
+        workers = min(8, os.cpu_count() or 4)
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [
+                pool.submit(_generate_target, key, parts, mods, index, pcbanks,
+                            WORK_ROOT, log, compiler, building)
+                for key, parts, _fp in generate
+            ]
+            for fut in futures:
+                fut.result()  # re-raises MergeError etc; building dir is discarded
+                written += 1
 
     if managed.exists():
         shutil.rmtree(managed)
     building.rename(managed)
     shutil.rmtree(WORK_ROOT, ignore_errors=True)
+    new_cache = {key: cache[key] for key in groups if key in cache}
+    for key, _parts, fp in generate:
+        new_cache[key] = fp
+    _save_build_cache(new_cache)
+    log(
+        f"loose rebuild: {len(reuse)} file(s) reused, {len(generate)} generated "
+        f"in {time.monotonic() - started:.1f}s"
+    )
     return {"files": written}
+
+
+def _warm_vanilla(parts: list, index: dict, pcbanks: str, log, compiler) -> None:
+    """Pre-decompile the vanilla base for one target (serial; repeats hit the cache)."""
+    if len(parts) == 1:
+        _order, _name, hit, _rel, is_tree = parts[0]
+        if is_tree and hit.pak:
+            _extract_and_decompile(pcbanks, hit.pak, hit.stored, index, log, compiler)
+        return
+    for _order, _name, hit, _rel, is_tree in parts:
+        if hit.pak and is_tree:
+            _extract_and_decompile(pcbanks, hit.pak, hit.stored, index, log, compiler)
+            return  # only the first pak-backed contributor is the merge base
+
+
+def _generate_target(key: str, parts: list, mods: dict, index: dict, pcbanks: str,
+                     work: Path, log, compiler, building: Path) -> None:
+    """Worker: build one target's content and write it into the building folder."""
+    data = _content_for_group(key, parts, mods, index, pcbanks, work, log, compiler)
+    target = building / parts[0][3]
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(data)
 
 
 def _content_for_group(key: str, parts: list, mods: dict, index: dict, pcbanks: str,

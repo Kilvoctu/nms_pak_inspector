@@ -3122,10 +3122,10 @@ class MainWindow(QMainWindow):
         }
         if mod_conflicts:
             status = ST_CONFLICT
-        elif mod_shared or any(h.stored in mod_ambiguous for h in mod.game_files):
-            status = ST_MERGE
         elif mod.has_unmatched:
             status = ST_UNMATCHED
+        elif mod_shared or any(h.stored in mod_ambiguous for h in mod.game_files):
+            status = ST_MERGE
         else:
             status = ST_CLEAN
         return status, mod_conflicts, mod_ambiguous, mod_shared
@@ -3148,8 +3148,15 @@ class MainWindow(QMainWindow):
             + ", ".join(
                 f"{c.path} ({c.stored})" for c in mod_conflicts.values()
             ),
-            ST_UNMATCHED: "Some file(s) matched no pak entry - they would be added as new files.",
+            ST_UNMATCHED: "Contains new file(s) no vanilla pak has - pak injection cannot add them "
+            "(baked references may crash; use Loose Install).",
         }[status]
+        new_count = sum(1 for h in mod.game_files if h.pak is None)
+        if new_count and status != ST_UNMATCHED:
+            detail += (
+                f"\nAlso {new_count} new file(s) not in any vanilla pak - pak injection "
+                "cannot add them (use Loose Install)."
+            )
         return _wrap_tooltip(
             f"{len(mod.game_files)} game file(s) in {len(mod.paks)} pak(s).\n{detail}"
         )
@@ -3907,11 +3914,36 @@ class MainWindow(QMainWindow):
             return
         if not self._pre_flight():
             return
+        with_new = []
+        for name in eligible:
+            mod = next((m for m in self._scan["mods"] if m.name == name), None)
+            n = sum(1 for h in (mod.game_files if mod else []) if h.pak is None)
+            if n:
+                with_new.append(f"{name} ({n} new file(s))")
+        if with_new and not self._warn_new_files_mods(with_new):
+            self.append_log("Inject all cancelled")
+            return
         self._start_task(
             merge_preview_worker, eligible, self._scan, self._index,
             self._current_pcbanks(),
             on_done=lambda result: self._on_inject_all_preview(eligible, result),
         )
+
+    def _warn_new_files_mods(self, listing: list[str]) -> bool:
+        """Inject-all gate: confirm when eligible mods ship files no vanilla pak has."""
+        shown = "\n".join(f"   {line}" for line in listing[:8])
+        more = f"\n   … +{len(listing) - 8} more" if len(listing) > 8 else ""
+        answer = QMessageBox.question(
+            self, "Mods contain new files",
+            f"{len(listing)} mod(s) contain file(s) that don't exist in any vanilla pak:\n\n"
+            f"{shown}{more}\n\n"
+            "Pak injection cannot add new files - those mods may end up referencing "
+            "missing assets (this is what crashed the game with Diablos Black Hole).\n"
+            "Loose Install places new files correctly.\n\n"
+            "Inject them anyway?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        return answer == QMessageBox.StandardButton.Yes
 
     def _on_inject_all_preview(self, eligible: list[str], preview: dict) -> None:
         has_conflicts = any(
