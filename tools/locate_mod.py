@@ -20,7 +20,6 @@ resolve - they become new pak entries - but path-form misses deserve a look).
 import argparse
 import glob as globmod
 import hashlib
-import json
 import os
 import sys
 import zipfile
@@ -58,7 +57,9 @@ def candidate_forms(name: str) -> list:
     # shipped path doesn't already carry a game-root prefix - some mod authors
     # omit it. Try the METADATA-prefixed forms last (both prefix cases).
     if not n.lower().startswith(("metadata/", "models/", "textures/", "sound/")):
-        for c in list(cands):
+        # add() appends to cands while iterating: the list() copy is REQUIRED
+        # (ruff PERF101 wants it gone - do not "fix").
+        for c in list(cands):  # noqa: PERF101
             add("METADATA/" + c)
             add("metadata/" + c)
     return cands
@@ -124,7 +125,7 @@ def locate_zip(zip_path: str, hashmap: dict):
             continue  # loader metadata, not a game file
         if os.path.splitext(base)[1].lower() in SKIP_EXT:
             print(f"  {name}")
-            print(f"      (skipped: not a game file)")
+            print("      (skipped: not a game file)")
             continue
         # Zip entries sit under a wrapper folder named after the mod; loose
         # folder entries are already relative to the mod root.
@@ -138,9 +139,9 @@ def locate_zip(zip_path: str, hashmap: dict):
         else:
             unresolved += 1
             print(f"  {name}")
-            print(f"      -> NOT FOUND (would be a new pak entry)")
+            print("      -> NOT FOUND (would be a new pak entry)")
     paks = sorted({p for _, _, p, _ in resolved_paths})
-    print(f"  summary: paks touched: " + (", ".join(paks) if paks else "none"))
+    print("  summary: paks touched: " + (", ".join(paks) if paks else "none"))
     return unresolved, resolved_paths
 
 
@@ -174,7 +175,7 @@ def main() -> int:
     # Cross-mod collisions: 2+ mods assign the same pak path -> merge mandatory.
     collisions = {p: zips_ for p, zips_ in owner.items() if len(zips_) > 1}
     if collisions:
-        print(f"\n!!! COLLIDING MODS - one MBIN per pak path wins, merging is mandatory:")
+        print("\n!!! COLLIDING MODS - one MBIN per pak path wins, merging is mandatory:")
         for p, zips_ in sorted(collisions.items()):
             print(f"  {p}")
             for zn in zips_:

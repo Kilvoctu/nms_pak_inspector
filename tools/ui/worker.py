@@ -15,7 +15,14 @@ from zipfile import ZipFile
 
 from PySide6.QtCore import QThread, Signal
 
-from .. import index_paks, inject_mods, install_mods, locate_mod, mbincompiler, verify_mods
+from .. import (
+    index_paks,
+    inject_mods,
+    install_mods,
+    locate_mod,
+    mbincompiler,
+    verify_mods,
+)
 
 
 def friendly_error(exc: BaseException) -> str:

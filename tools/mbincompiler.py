@@ -24,7 +24,7 @@ from . import repo
 MANAGED_DIR = repo.mbincompilers_dir()
 INVENTORY = MANAGED_DIR / "inventory.json"
 GAME_PACKAGE = repo.GAME_PACKAGE  # single source of truth in repo
-REPO_API = f"https://api.github.com/repos/monkeyman192/MBINCompiler/releases?per_page=100"
+REPO_API = "https://api.github.com/repos/monkeyman192/MBINCompiler/releases?per_page=100"
 LOG_VERSION_RE = re.compile(r"\[VERSION\]: MBINCompiler v(\d+\.\d+\.\d+(?:\.\d+)?)")
 
 # Release-list cache: GitHub allows only 60 unauthenticated requests/hour,

@@ -22,38 +22,34 @@ from PySide6.QtCore import (
     QByteArray,
     QEvent,
     QPoint,
-    QPointF,
     QRect,
-    QRectF,
     QSize,
     Qt,
     QTimer,
-    QPersistentModelIndex,
     Signal,
 )
 from PySide6.QtGui import (
-    QColor,
     QBrush,
+    QColor,
     QCursor,
     QFont,
     QFontDatabase,
     QGuiApplication,
     QImage,
+    QKeySequence,
     QMouseEvent,
-    QPalette,
     QPainter,
+    QPalette,
     QPen,
     QPixmap,
-    QPolygonF,
     QShortcut,
-    QKeySequence,
     QShowEvent,
 )
 from PySide6.QtWidgets import (
-    QComboBox,
     QAbstractItemView,
     QApplication,
     QCheckBox,
+    QComboBox,
     QDialog,
     QFileDialog,
     QHBoxLayout,
@@ -67,9 +63,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QSplitter,
-    QStyle,
     QStyledItemDelegate,
-    QStyleOptionButton,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
@@ -81,8 +75,23 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import index_paks, inject_mods, install_mods, mbincompiler, merge_mods, paklib, repo, verify_mods
-from ..conflicts import K_AMBIGUOUS, K_CONFLICT, K_DUPLICATE, FieldConflict, compute_field_conflicts
+from .. import (
+    index_paks,
+    inject_mods,
+    install_mods,
+    mbincompiler,
+    merge_mods,
+    paklib,
+    repo,
+    verify_mods,
+)
+from ..conflicts import (
+    K_AMBIGUOUS,
+    K_CONFLICT,
+    K_DUPLICATE,
+    FieldConflict,
+    compute_field_conflicts,
+)
 from .worker import (
     FileHit,
     ModScan,
@@ -191,7 +200,7 @@ def _dimmed(palette: QPalette, amount: float = 0.4) -> QColor:
     """Palette text color blended toward the window background."""
     text = palette.color(QPalette.ColorGroup.Normal, QPalette.ColorRole.WindowText)
     back = palette.color(QPalette.ColorGroup.Normal, QPalette.ColorRole.Window)
-    blend = lambda a, b: a + round((b - a) * amount)  # noqa: E731
+    blend = lambda a, b: a + round((b - a) * amount)
     return QColor(
         blend(text.red(), back.red()),
         blend(text.green(), back.green()),
@@ -327,7 +336,7 @@ class _TitleBar(QWidget):
         self._busy_count = max(0, self._busy_count)
         self.update()
 
-    def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
+    def paintEvent(self, event) -> None:
         painter = QPainter(self)
         painter.fillRect(self.rect(), self.palette().color(QPalette.ColorRole.Window))
         if self._busy_count > 0:
@@ -454,7 +463,7 @@ class _RowActionDelegate(QStyledItemDelegate):
             QRect(area.left() + w + gap, area.top(), area.width() - w - gap, area.height()),
         )
 
-    def sizeHint(self, option, index) -> QSize:  # noqa: N802 - Qt naming
+    def sizeHint(self, option, index) -> QSize:
         """Rows must be tall enough for the painted action buttons."""
         hint = super().sizeHint(option, index)
         if index.column() == 5:
@@ -1568,9 +1577,9 @@ class _RawAssetDialog(QDialog):
     def _dds_preview(self, data: bytes) -> QLabel | None:
         """Decode a DDS texture with Pillow (best effort) into a label."""
         try:
-            from PIL import Image  # noqa: PLC0415 - optional dependency
-
             import io
+
+            from PIL import Image
 
             img = Image.open(io.BytesIO(data))
             width, height = img.size
@@ -2028,7 +2037,7 @@ class _FieldDialog(QDialog):
                 zout.writestr(info, payload)
         os.replace(tmp, zip_path)
 
-    def reject(self) -> None:  # noqa: N802 - Qt naming
+    def reject(self) -> None:
         if self._dirty:
             answer = QMessageBox.question(
                 self, "Discard changes?",
@@ -2039,7 +2048,7 @@ class _FieldDialog(QDialog):
                 return
         self.done(QDialog.DialogCode.Rejected)
 
-    def done(self, result: int) -> None:  # noqa: N802 - Qt naming
+    def done(self, result: int) -> None:
         _settings().setValue("editor_geometry", self.saveGeometry().data().hex())
         shutil.rmtree(self._edit_work, ignore_errors=True)
         super().done(result)
@@ -2887,9 +2896,7 @@ class MainWindow(QMainWindow):
                 if hit.stored is not None:
                     if hit.stored in conflict_map:
                         child_status = ST_CONFLICT
-                    elif hit.stored in ambiguous_map:
-                        child_status = ST_MERGE
-                    elif hit.stored in collisions:
+                    elif hit.stored in ambiguous_map or hit.stored in collisions:
                         child_status = ST_MERGE
                     else:
                         child_status = ST_CLEAN
@@ -3637,7 +3644,7 @@ class MainWindow(QMainWindow):
 
     # --- persistence -----------------------------------------------------------
 
-    def closeEvent(self, event) -> None:  # noqa: N802 - Qt naming
+    def closeEvent(self, event) -> None:
         for worker in list(self._active_workers):
             worker.wait(5000)
         self._restore_edge_cursor()
@@ -3675,7 +3682,7 @@ def _open_in_explorer(path: str) -> None:
     import os
 
     if Path(path).is_dir():
-        os.startfile(path)  # noqa: S606 - intended shell open
+        os.startfile(path)
         return
     # Select the file via the Shell API: command-line forms ('explorer /select,…')
     # break on paths containing spaces unless quoted exactly right.

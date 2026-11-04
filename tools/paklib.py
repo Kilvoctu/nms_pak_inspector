@@ -269,8 +269,7 @@ def inject(
     # Windows [0, boundary) lie entirely before the first changed byte and can
     # be copied verbatim from the source regardless of layout shifts.
     boundary = (first_change // CHUNK_SIZE) if first_change is not None else 0
-    if boundary > src.chunk_count:
-        boundary = src.chunk_count
+    boundary = min(boundary, src.chunk_count)
     verbatim = src.is_compressed and compress
     if not verbatim:
         boundary = 0
@@ -286,7 +285,6 @@ def inject(
 
     copied_chunks = 0
     copied_bytes = 0
-    chunk_sizes_out: list[int] = []
     compressor = zstd.ZstdCompressor(level=level)
     bulk_compressor = (
         zstd.ZstdCompressor(level=bulk_level) if bulk_level != level else compressor
@@ -413,8 +411,7 @@ class _NewStream:
         end = start + length
         # Parts are contiguous and sorted; bisect to the covering part.
         i = bisect.bisect_right(self._starts, start) - 1
-        if i < 0:
-            i = 0
+        i = max(i, 0)
         parts = self._parts
         while i < len(parts) and parts[i][0] < end:
             off, plen, mem, src_name = parts[i]

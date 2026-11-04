@@ -36,7 +36,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from zipfile import ZipFile
 
-from . import mbincompiler, paklib, repo  # noqa: E402
+from . import mbincompiler, paklib, repo
 
 CACHE_DIR = repo.vanilla_cache_dir()
 

@@ -28,7 +28,7 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import merge_mods, mbincompiler, paklib, repo
+from . import mbincompiler, merge_mods, paklib, repo
 from .verify_mods import _extract_and_decompile, _parse_mod_tree, _read_mod_data
 
 STATE_FILE = repo.inject_state_file()

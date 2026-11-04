@@ -21,7 +21,7 @@ import sys
 import time
 from datetime import datetime, timezone
 
-from . import mbincompiler, paklib, repo  # noqa: E402
+from . import mbincompiler, paklib, repo
 
 DEFAULT_OUT = str(repo.index_file())
 
