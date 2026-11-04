@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import shutil
+import time
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from pathlib import Path
@@ -91,7 +92,18 @@ def _vanilla_root(van_mxml: Path):
 def _swap_pak(pak_path: Path, changes: dict[str, bytes], log) -> dict:
     """Rewrite one pak with ``changes`` and atomically swap it in."""
     tmp = pak_path.with_suffix(".pak.injecting")
-    stats = paklib.inject(pak_path, changes, tmp)
+    name = pak_path.name
+
+    def report(done: int, total: int) -> None:
+        # 10% steps, plus a 20s heartbeat for slow stretches (huge paks crawl).
+        step = done * 100 // total
+        now = time.monotonic()
+        if step > _state[0] or now - _state[1] > 20:
+            _state[0], _state[1] = step, now
+            log(f"re-chunking {name}: {step}% ({done:,}/{total:,} windows)")
+
+    _state = [-1, 0.0]
+    stats = paklib.inject(pak_path, changes, tmp, progress=report)
     os.replace(tmp, pak_path)
     log(
         f"wrote {pak_path.name}: {stats['files']} file(s), "

@@ -2,7 +2,12 @@
 
 import bisect
 import hashlib
+import os
 import struct
+import threading
+import time
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import zstandard as zstd
@@ -43,6 +48,9 @@ class Pak:
         self.path = Path(path)
         self._f = open(self.path, "rb")
         self._chunk_cache: dict[int, bytes] = {}
+        # Reused across reads (creating one per call is surprisingly costly);
+        # safe to share because each thread gets its own Pak instance.
+        self._zdec = zstd.ZstdDecompressor()
         self._read()
 
     def close(self) -> None:
@@ -124,7 +132,7 @@ class Pak:
             data = raw
         else:
             try:
-                data = zstd.ZstdDecompressor().decompress(raw, max_output_size=CHUNK_SIZE)
+                data = self._zdec.decompress(raw, max_output_size=CHUNK_SIZE)
             except zstd.ZstdError:
                 if len(raw) == CHUNK_SIZE:
                     data = raw  # chunk was stored uncompressed
@@ -179,10 +187,12 @@ def inject(
     level: int = 12,
     bulk_level: int = BULK_LEVEL,
     full_check: bool = False,
+    progress=None,
+    workers: int | None = None,
 ) -> dict:
     """Rewrite `source` pak with `changes` applied into `out` (no new files: full re-chunk).
 
-    Untouched windows copy compressed-verbatim (layout unchanged); a shifted tail re-chunks at ``bulk_level``."""
+    Untouched windows copy verbatim; a shifted tail re-chunks at ``bulk_level``; ``workers=1`` = serial, same bytes."""
     src = Pak(source)
     names = list(src.filenames)
     added = [n for n in changes if n not in src.file_map]
@@ -238,15 +248,8 @@ def inject(
     data_offset = 0x50 + 0x20 * n_real + (8 * chunk_count if compress else 0)
     data_offset += _padding16(data_offset)
 
-    # Stream reader over the new content.
-    stream = _NewStream(src, files, fp_new)
-
     copied_chunks = 0
     copied_bytes = 0
-    compressor = zstd.ZstdCompressor(level=level)
-    bulk_compressor = (
-        zstd.ZstdCompressor(level=bulk_level) if bulk_level != level else compressor
-    )
     with open(out, "wb") as fo:
         fo.write(struct.pack("<5s3xQQQ?7xQ", MAGIC, 2, file_count, chunk_count, compress, data_offset))
         fo.seek(0x30)
@@ -268,38 +271,109 @@ def inject(
         if actual_data_offset != data_offset:
             raise PakError(f"data_offset miscalculation: {data_offset} != {actual_data_offset}")
 
-        # Data region.
-        written = 0
-        sizes_written: list[int] = []
-        for k in range(chunk_count):
+        # Data region. Rebuild windows (source decompress + recompress) are the
+        # expensive part - zstd releases the GIL, so they run in a thread pool
+        # with per-worker source handles (_chunk_cache is not thread-safe).
+        # Results are consumed strictly in order: output is byte-identical to
+        # the serial path.
+        local = threading.local()
+        opened: list[Pak] = []
+        open_lock = threading.Lock()
+
+        def _worker_init() -> None:
+            pak = Pak(source)
+            with open_lock:
+                opened.append(pak)
+            local.pak = pak
+            local.stream = _NewStream(pak, files, fp_new)
+            comp = zstd.ZstdCompressor(level=level)
+            local.compressors = (
+                comp,
+                comp if bulk_level == level else zstd.ZstdCompressor(level=bulk_level),
+            )
+
+        def _rebuild(k: int) -> tuple[int, bytes, int]:
+            if not hasattr(local, "stream"):
+                _worker_init()  # serial path runs on the main thread
             a = k * CHUNK_SIZE
             b = min(a + CHUNK_SIZE, total_padded)
-            overlaps = _overlaps(a, b, changed_ranges)
-            if (
+            window = local.stream.read(a, b - a)
+            if compress:
+                comp = (
+                    local.compressors[0]
+                    if _overlaps(a, b, changed_ranges)
+                    else local.compressors[1]
+                )
+                data = comp.compress(window)
+            else:
+                data = window
+            return k, data, len(data)
+
+        def _eligible(k: int) -> bool:
+            a = k * CHUNK_SIZE
+            return bool(
                 verbatim
                 and k < src.chunk_count
-                and (k < boundary or (layout_identical and not overlaps))
-            ):
-                # Copy the source chunk's stored bytes verbatim (0x10-aligned).
-                stored = _req_chunk_bytes(src.chunk_sizes[k])
-                src._f.seek(src.chunk_offsets[k])
-                data = src._f.read(stored)
-                size = src.chunk_sizes[k]
-                copied_chunks += 1
-                copied_bytes += stored
-            else:
-                window = stream.read(a, b - a)
-                if compress:
-                    comp = compressor if overlaps else bulk_compressor
-                    data = comp.compress(window)
+                and (
+                    k < boundary
+                    or (layout_identical and not _overlaps(a, min(a + CHUNK_SIZE, total_padded), changed_ranges))
+                )
+            )
+
+        written = 0
+        sizes_written: list[int] = []
+        next_progress = 0.0
+
+        def _emit(k: int) -> None:
+            nonlocal next_progress
+            now = time.monotonic()
+            if progress is not None and now >= next_progress:
+                next_progress = now + 2.0
+                progress(k + 1, chunk_count)
+
+        n_workers = max(1, min(8, workers or os.cpu_count() or 1))
+        pool = (
+            ThreadPoolExecutor(max_workers=n_workers, initializer=_worker_init)
+            if n_workers > 1
+            else None
+        )
+        # Bounded in-flight batches keep memory flat on GB-scale paks.
+        pending = deque(k for k in range(chunk_count) if not _eligible(k))
+        inflight: deque = deque()
+        max_in_flight = n_workers * 8
+        try:
+            if pool:
+                for _ in range(max_in_flight):
+                    if not pending:
+                        break
+                    inflight.append(pool.submit(_rebuild, pending.popleft()))
+            for k in range(chunk_count):
+                if _eligible(k):
+                    # Copy the source chunk's stored bytes verbatim (0x10-aligned).
+                    stored = _req_chunk_bytes(src.chunk_sizes[k])
+                    src._f.seek(src.chunk_offsets[k])
+                    data = src._f.read(stored)
+                    size = src.chunk_sizes[k]
+                    copied_chunks += 1
+                    copied_bytes += stored
+                elif pool:
+                    while pending and len(inflight) < max_in_flight:
+                        inflight.append(pool.submit(_rebuild, pending.popleft()))
+                    kk, data, size = inflight.popleft().result()
+                    assert kk == k, "rebuild result out of order"
                 else:
-                    data = window
-                size = len(data)
-            sizes_written.append(size)
-            fo.write(data)
-            fo.write(b"\x00" * (_req_chunk_bytes(size) - len(data)))
-            written += 1
-        assert written == chunk_count, "chunk count mismatch"
+                    _, data, size = _rebuild(k)
+                sizes_written.append(size)
+                fo.write(data)
+                fo.write(b"\x00" * (_req_chunk_bytes(size) - len(data)))
+                written += 1
+                _emit(k)
+            assert written == chunk_count, "chunk count mismatch"
+        finally:
+            if pool:
+                pool.shutdown(wait=True)
+            for pak in opened:
+                pak.close()
 
         # Fill in the chunk index (compressed sizes).
         if compress:
@@ -377,12 +451,16 @@ class _NewStream:
             part_padded_end = off + _roundup16(plen)
             if part_padded_end <= start:
                 continue
-            if mem is None:
-                mem = self.src.read_file(src_name)
             lo = max(start, off)
             hi = min(end, off + plen)
             if lo < hi:
-                out += mem[lo - off:hi - off]
+                if mem is None:
+                    # Range read: touch only the source chunks this window
+                    # needs (read_file would concatenate the whole file).
+                    src_abs = self.src.file_map[src_name][1]
+                    out += self.src._read_range(src_abs + (lo - off), hi - lo)
+                else:
+                    out += mem[lo - off:hi - off]
             pad_lo = max(start, off + plen)
             pad_hi = min(end, part_padded_end)
             if pad_lo < pad_hi:

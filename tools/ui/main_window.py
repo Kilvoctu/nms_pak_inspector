@@ -131,6 +131,8 @@ _TREE_COLUMN_WIDTHS = (
 _ACTION_ROLE = Qt.ItemDataRole.UserRole + 1  # per-mod action state (dict)
 _SCANTIP_ROLE = Qt.ItemDataRole.UserRole + 2  # scan-derived part of a file tooltip
 
+_RECHUNK_PCT = re.compile(r"^re-chunking .*?: (\d+)% ")  # paklib re-chunk log lines
+
 _RESIZE_MARGIN = 8  # resizable window border thickness
 _PATH_LABEL_WIDTH = 78  # aligns the Mods folder / PCBANKS path rows
 _PROJECT_ROOT = repo.project_root()
@@ -2354,6 +2356,7 @@ class MainWindow(QMainWindow):
         self._compiler_release: dict | None = None  # remote release pending download
         self._inject_state: dict = {}  # inject_mods state: mod name -> files
         self._injecting_mod: str | None = None  # mod whose inject/revert runs
+        self._inject_progress: int | None = None  # re-chunk % for the busy label
         self._installed_mods: set[str] = set()  # folder names in GAMEDATA\MODS
         self._installing_mod: str | None = None  # mod whose install/remove runs
         self._user_col_widths: dict[int, int] = {}  # widths the user chose
@@ -2690,6 +2693,7 @@ class MainWindow(QMainWindow):
         if self._injecting_mod is not None or self._installing_mod is not None:
             # A failed action must not leave its button stuck mid-state.
             self._injecting_mod = None
+            self._inject_progress = None
             self._installing_mod = None
         if self._scan is not None:
             self._inject_state = inject_mods.load_state()
@@ -3577,7 +3581,11 @@ class MainWindow(QMainWindow):
     def _action_state(self, name: str, busy: bool) -> dict:
         """Per-mod action labels, enabled flags and tooltips for the Actions column."""
         if name == self._injecting_mod:
-            return {"busy": "Injecting…", "tips": ("", "")}
+            verb = "Reverting" if name in self._inject_state else "Injecting"
+            label = f"{verb}…"
+            if self._inject_progress is not None:
+                label += f" {self._inject_progress}%"
+            return {"busy": label, "tips": ("", "")}
         if name == self._installing_mod:
             return {"busy": "Installing…", "tips": ("", "")}
         injected = name in self._inject_state
@@ -3677,6 +3685,7 @@ class MainWindow(QMainWindow):
                 self._start_merge_preview([mod_name] + partners)
                 return
         self._injecting_mod = mod_name
+        self._inject_progress = None
         self._refresh_actions()
         if mod_name in self._inject_state:
             self._start_task(
@@ -3770,6 +3779,7 @@ class MainWindow(QMainWindow):
 
     def _on_inject_done(self, result: dict) -> None:
         self._injecting_mod = None
+        self._inject_progress = None
         self._inject_state = inject_mods.load_state()
         self._fill_tree()  # rebuilds the buttons in their new state
 
@@ -3853,6 +3863,13 @@ class MainWindow(QMainWindow):
             print(f"[{stamp}] {message}", flush=True)
         except OSError:
             pass
+        # Surface re-chunk progress on the grayed-out inject/revert button
+        # (the console may not even be open).
+        if self._injecting_mod is not None:
+            m = _RECHUNK_PCT.search(message)
+            if m and int(m.group(1)) != (self._inject_progress or 0):
+                self._inject_progress = int(m.group(1))
+                self._update_action_states()
 
     # --- frameless edge resize (ported from ZZZ Mod Housekeeper) ---------------
 
