@@ -1,6 +1,8 @@
 """Verify loose mods against the actual vanilla data (a dry-run merge per file; see verdicts below)."""
 
 import hashlib
+import json
+import os
 import re
 import shutil
 import time
@@ -60,6 +62,73 @@ class FileVerification:
     status: str = FV_VERIFIED
     fields: list[FieldIssue] = field(default_factory=list)
     message: str = ""  # extra info (errors, "no effective changes", ...)
+
+
+# --- verification result cache ------------------------------------------------
+# Memoizes per-file verdicts keyed on everything that could change them:
+# mod content (zip CRC / file mtime), pak state, index build, compiler tag.
+# A cache hit is equivalent to a fresh verify (status, fields, message).
+
+VERIFY_CACHE = repo.cache_dir() / "verify_cache.json"
+
+
+def _load_verify_cache() -> dict:
+    try:
+        return json.loads(VERIFY_CACHE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_verify_cache(cache: dict) -> None:
+    VERIFY_CACHE.parent.mkdir(parents=True, exist_ok=True)
+    VERIFY_CACHE.write_text(json.dumps(cache), encoding="utf-8")
+
+
+def _vanilla_fingerprint(index: dict, compiler: dict) -> str:
+    """One string covering the whole vanilla side of every verification."""
+    paks = "|".join(
+        f"{name}:{info['size']}:{info.get('mtime')}"
+        for name, info in sorted(index.get("paks", {}).items())
+    )
+    return f"{index.get('generated')}:{compiler.get('tag')}:{paks}"
+
+
+def _mod_fingerprint(mod, hit) -> str:
+    """Cheap content identity of one mod file (no data reads for zips)."""
+    if mod.kind == "zip":
+        with ZipFile(mod.path) as z:
+            info = z.getinfo(hit.entry)
+        st = os.stat(mod.path)
+        return (
+            f"zip:{mod.path}:{hit.entry}:{info.CRC}:{info.file_size}:"
+            f"{st.st_size}:{int(st.st_mtime)}"
+        )
+    st = (Path(mod.path) / hit.entry).stat()
+    return f"dir:{mod.path}:{hit.entry}:{st.st_size}:{int(st.st_mtime)}"
+
+
+def _ver_to_cache(ver: FileVerification) -> dict:
+    return {
+        "status": ver.status,
+        "message": ver.message,
+        "fields": [
+            {
+                "path": f.path, "mod_value": f.mod_value,
+                "vanilla_value": f.vanilla_value, "verdict": f.verdict,
+                "note": f.note, "directive": f.directive, "noop": f.noop,
+            }
+            for f in ver.fields
+        ],
+    }
+
+
+def _ver_from_cache(mod, hit, data: dict) -> FileVerification:
+    return FileVerification(
+        mod_name=mod.name, entry=hit.entry, rel=hit.rel,
+        pak=hit.pak, stored=hit.stored,
+        status=data["status"], message=data["message"],
+        fields=[FieldIssue(**f) for f in data["fields"]],
+    )
 
 
 def _value_class(value: str | None) -> str:
@@ -456,6 +525,9 @@ def verify_scan(scan: dict, index: dict, log, only_mod: str | None = None) -> di
     compiler = mbincompiler.ensure_compiler()
     verifications: dict[tuple[str, str], FileVerification] = {}
     counts = {FV_VERIFIED: 0, FV_NO_EFFECT: 0, FV_FORMAT: 0, FV_OUTDATED: 0, FV_ERROR: 0}
+    cache = {} if only_mod is not None else _load_verify_cache()
+    van_fp = _vanilla_fingerprint(index, compiler)
+    cache_hits = 0
 
     work_dir = CACHE_DIR / "_modwork"
     last_yield = time.monotonic()
@@ -465,6 +537,14 @@ def verify_scan(scan: dict, index: dict, log, only_mod: str | None = None) -> di
         for hit in mod.game_files:
             if not (hit.pak and hit.stored):
                 continue  # unresolved: nothing to verify against
+            key = f"{_mod_fingerprint(mod, hit)}|{van_fp}"
+            cached = cache.get(key)
+            if cached is not None:
+                ver = _ver_from_cache(mod, hit, cached)
+                counts[ver.status] += 1
+                verifications[(mod.name, hit.entry)] = ver
+                cache_hits += 1
+                continue
             ver = FileVerification(
                 mod_name=mod.name, entry=hit.entry, rel=hit.rel,
                 pak=hit.pak, stored=hit.stored,
@@ -487,6 +567,7 @@ def verify_scan(scan: dict, index: dict, log, only_mod: str | None = None) -> di
                     else:
                         ver.status = FV_VERIFIED
                         ver.message = "raw asset override (byte-compared to vanilla)"
+                    cache[key] = _ver_to_cache(ver)
                     counts[ver.status] += 1
                     verifications[(mod.name, hit.entry)] = ver
                     continue
@@ -538,13 +619,20 @@ def verify_scan(scan: dict, index: dict, log, only_mod: str | None = None) -> di
                 ver.status = FV_ERROR
                 ver.message = f"{type(exc).__name__}: {exc}"
                 counts[ver.status] += 1
+            cache[key] = _ver_to_cache(ver)
             verifications[(mod.name, hit.entry)] = ver
 
+    if only_mod is None:
+        # Full scan: drop entries for mods/files that no longer exist.
+        _save_verify_cache(cache)
+    else:
+        _save_verify_cache({**_load_verify_cache(), **cache})
     shutil.rmtree(work_dir, ignore_errors=True)
     log(
         f"Verified {sum(counts.values())} file(s): "
         f"{counts[FV_VERIFIED]} clean, {counts[FV_NO_EFFECT]} no effect, "
         f"{counts[FV_FORMAT]} format warning(s), "
         f"{counts[FV_OUTDATED]} outdated, {counts[FV_ERROR]} error(s)"
+        + (f" ({cache_hits} from cache)" if cache_hits else "")
     )
     return {"verifications": verifications, "counts": counts}
