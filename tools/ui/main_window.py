@@ -109,6 +109,7 @@ from .worker import (
     install_mod_worker,
     merge_preview_worker,
     nexus_info_worker,
+    remove_loose_worker,
     revert_all_worker,
     revert_mod_worker,
     scan_mods_worker,
@@ -2364,7 +2365,7 @@ class MainWindow(QMainWindow):
         self._injecting_mod: str | None = None  # mod whose inject/revert runs
         self._inject_progress: int | None = None  # re-chunk % for the busy label
         self._audit_result: dict | None = None  # last audit_injections result
-        self._installed_mods: set[str] = set()  # folder names in GAMEDATA\MODS
+        self._installed_mods: set[str] = set()  # loose-installed mod names (manifest)
         self._installing_mod: str | None = None  # mod whose install/remove runs
         self._user_col_widths: dict[int, int] = {}  # widths the user chose
         self._fitting_columns = False  # guard: programmatic width changes
@@ -2576,6 +2577,8 @@ class MainWindow(QMainWindow):
         self._inject_all_action.triggered.connect(self._on_inject_all)
         self._audit_action = menu.addAction("Audit injected mods")
         self._audit_action.triggered.connect(self._on_audit_action)
+        remove_loose = menu.addAction("Remove loose installs")
+        remove_loose.triggered.connect(self._on_remove_loose)
         menu.addSeparator()
         expand_all = menu.addAction("Expand all")
         expand_all.triggered.connect(self._tree.expandAll)
@@ -2584,7 +2587,7 @@ class MainWindow(QMainWindow):
         menu.addSeparator()
         open_mods = menu.addAction("Open mods folder")
         open_mods.triggered.connect(self._on_open_mods_folder)
-        open_game = menu.addAction("Open game folder")
+        open_game = menu.addAction("Open GAMEDATA folder")
         open_game.triggered.connect(self._on_open_game_folder)
         menu.addSeparator()
         console = menu.addAction("Show console")
@@ -3368,7 +3371,11 @@ class MainWindow(QMainWindow):
         self._open_folder(self._mods_edit.text().strip(), "Mods folder")
 
     def _on_open_game_folder(self) -> None:
-        self._open_folder(self._game_edit.text().strip(), "Game folder")
+        """Open the game's GAMEDATA folder (PCBANKS' parent) to save some clicks."""
+        if self._pcbanks:
+            self._open_folder(str(Path(self._pcbanks).parent), "GAMEDATA folder")
+        else:
+            self._open_folder(self._game_edit.text().strip(), "Game folder")
 
     def _open_folder(self, folder: str, label: str) -> None:
         if Path(folder).is_dir():
@@ -3620,7 +3627,7 @@ class MainWindow(QMainWindow):
         self._update_action_states()
 
     def _is_installed(self, mod_name: str) -> bool:
-        return install_mods.safe_name(mod_name) in self._installed_mods
+        return mod_name in self._installed_mods
 
     def _on_col_resized(self, idx: int, _old: int, new: int) -> None:
         """Record user column sizing; the re-fit is deferred (mid-drag re-layout
@@ -3954,18 +3961,40 @@ class MainWindow(QMainWindow):
         self._refresh_actions()
         if installed:
             self._start_task(
-                uninstall_mod_worker, mod_name, self._scan,
+                uninstall_mod_worker, mod_name, self._scan, self._index,
                 self._current_pcbanks(), on_done=self._on_install_done,
             )
         else:
             self._start_task(
-                install_mod_worker, mod_name, self._scan,
+                install_mod_worker, mod_name, self._scan, self._index,
                 self._current_pcbanks(), on_done=self._on_install_done,
             )
 
     def _on_install_done(self, result: dict) -> None:
         self._installing_mod = None
         self._fill_tree()  # re-reads the loose-mod folder state from disk
+
+    def _on_remove_loose(self) -> None:
+        """Wipe the managed loose-install folder (nmspi-managed) and its manifest."""
+        if self._worker is not None:
+            return
+        n = len(install_mods.installed_names(self._pcbanks)) if self._pcbanks else 0
+        if n == 0:
+            self.append_log("No loose installs to remove")
+            return
+        answer = QMessageBox.question(
+            self, "Remove loose installs",
+            f"Remove all {n} loose-installed mod(s)?\n\n"
+            f"Wipes GAMEDATA\\MODS\\{install_mods.MANAGED_FOLDER} and its manifest. "
+            "The mod archives are not modified.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._start_task(
+            remove_loose_worker, self._scan, self._index,
+            self._current_pcbanks(), on_done=self._on_install_done,
+        )
 
     def _on_restore_vanilla(self) -> None:
         if self._worker is not None:
@@ -3985,8 +4014,9 @@ class MainWindow(QMainWindow):
         )
         if n_loose:
             text += (
-                f"\n\n{n_loose} loose mod folder(s) in GAMEDATA\\MODS are not "
-                "touched (remove them individually if wanted)."
+                f"\n\n{n_loose} loose-installed mod(s) live in GAMEDATA\\MODS\\"
+                f"{install_mods.MANAGED_FOLDER} and are not touched by this action "
+                "(use Remove loose installs for those)."
             )
         if not self._pre_flight():
             return

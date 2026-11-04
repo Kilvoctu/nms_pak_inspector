@@ -375,16 +375,21 @@ def audit_worker(log, pcbanks: str) -> dict:
     return audit_injected.audit_injections(pcbanks, log)
 
 
-def install_mod_worker(log, mod_name: str, scan: dict, pcbanks: str) -> dict:
-    """Copy one mod's files into the game's loose-mod folder (background)."""
+def install_mod_worker(log, mod_name: str, scan: dict, index: dict, pcbanks: str) -> dict:
+    """Add one mod to the managed loose install and rebuild the folder (background)."""
     mod = _find_mod(scan, mod_name)
-    log(f"Installing {mod_name} to GAMEDATA\\MODS…")
-    return install_mods.install_mod(mod, pcbanks, log)
+    log(f"Installing {mod_name} to GAMEDATA\\MODS\\{install_mods.MANAGED_FOLDER}…")
+    return install_mods.install_mod(mod, scan, index, pcbanks, log)
 
 
-def uninstall_mod_worker(log, mod_name: str, scan: dict, pcbanks: str) -> dict:
-    """Remove one mod's folder from the loose-mod loader (background)."""
-    return install_mods.uninstall_mod(mod_name, pcbanks, log)
+def uninstall_mod_worker(log, mod_name: str, scan: dict, index: dict, pcbanks: str) -> dict:
+    """Remove one mod from the managed loose install and rebuild (background)."""
+    return install_mods.uninstall_mod(mod_name, scan, index, pcbanks, log)
+
+
+def remove_loose_worker(log, scan: dict, index: dict, pcbanks: str) -> dict:
+    """Wipe the managed loose-install folder and manifest (background)."""
+    return install_mods.remove_all(pcbanks, log)
 
 
 def revert_all_worker(log, scan: dict, index: dict, pcbanks: str) -> dict:
