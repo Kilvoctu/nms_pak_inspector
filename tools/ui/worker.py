@@ -240,6 +240,12 @@ def scan_mods_worker(
 
     mods: list[ModScan] = []
     owners: dict[str, list[str]] = {}  # stored pak path -> [mod names]
+    root_dirs = {
+        p.split("/", 1)[0].lower()
+        for info in index.get("paks", {}).values()
+        for p in info.get("files", [])
+        if "/" in p
+    }
     for root, mod_name, kind, superseded in sources:
         scan = ModScan(
             name=mod_name, path=str(root), kind=kind,
@@ -271,6 +277,21 @@ def scan_mods_worker(
                 owners.setdefault(stored, []).append(mod_name)
             else:
                 scan.hits.append(FileHit(entry=entry, rel=rel))
+
+        unresolved = [h for h in scan.hits if h.pak is None and not h.skipped]
+        sib_dirs: dict[str, str] = {}
+        for h in scan.hits:
+            if h.stored and "/" in h.stored:
+                sib_dirs[h.stored.rsplit("/", 1)[0]] = h.pak
+        if unresolved and len(sib_dirs) == 1:
+            base, pak = next(iter(sib_dirs.items()))
+            for h in unresolved:
+                first = h.rel.replace("\\", "/").split("/", 1)[0].lower()
+                if first in root_dirs:
+                    continue  # pak-root anchored: a plain new file
+                h.pak = pak
+                h.stored = f"{base}/{h.rel}".replace("\\", "/").lower()
+                h.match = f"scene-relative to {base}/"
         mods.append(scan)
 
     collisions = {p: names for p, names in owners.items() if len(names) > 1}

@@ -3472,7 +3472,9 @@ class MainWindow(QMainWindow):
         hit = self._find_hit(ver.mod_name, ver.entry)
         if mod is None or hit is None or ver.pak is None or self._pcbanks is None:
             return
-        if verify_mods.is_raw_asset(hit.entry):
+        if verify_mods.is_raw_asset(hit.entry) or ver.is_new:
+            # Raw assets and scene-relative new files: no vanilla tree to diff
+            # (the raw dialog shows the mod payload and degrades gracefully).
             dlg = _RawAssetDialog(ver, mod, hit, self._pcbanks, self)
             dlg.exec()
             return

@@ -61,6 +61,7 @@ class FileVerification:
     status: str = FV_VERIFIED
     fields: list[FieldIssue] = field(default_factory=list)
     message: str = ""  # extra info (errors, "no effective changes", ...)
+    is_new: bool = False  # file adds something vanilla doesn't have
 
 
 # --- verification result cache ------------------------------------------------
@@ -69,6 +70,20 @@ class FileVerification:
 # A cache hit is equivalent to a fresh verify (status, fields, message).
 
 VERIFY_CACHE = repo.cache_dir() / "verify_cache.json"
+
+_PAK_FILE_CACHE: dict[str, set[str]] = {}
+
+
+def _pak_file_set(index: dict) -> set[str]:
+    """All stored paths across paks, cached per index build (new-file checks)."""
+    gen = index.get("generated")
+    cached = _PAK_FILE_CACHE.get(gen)
+    if cached is None:
+        cached = {
+            p for info in index.get("paks", {}).values() for p in info.get("files", [])
+        }
+        _PAK_FILE_CACHE[gen] = cached
+    return cached
 
 
 def _load_verify_cache() -> dict:
@@ -86,12 +101,12 @@ def _save_verify_cache(cache: dict) -> None:
 def _vanilla_fingerprint(index: dict, compiler: dict) -> str:
     """One string covering the whole vanilla side of every verification.
 
-    v2 = identity-aware sibling pairing (bump to invalidate after pairing changes)."""
+    v3 = identity pairing + template leniency + comment stripping (bump on engine changes)."""
     paks = "|".join(
         f"{name}:{info['size']}:{info.get('mtime')}"
         for name, info in sorted(index.get("paks", {}).items())
     )
-    return f"v2:{index.get('generated')}:{compiler.get('tag')}:{paks}"
+    return f"v3:{index.get('generated')}:{compiler.get('tag')}:{paks}"
 
 
 def _mod_fingerprint(mod, hit) -> str:
@@ -112,6 +127,7 @@ def _ver_to_cache(ver: FileVerification) -> dict:
     return {
         "status": ver.status,
         "message": ver.message,
+        "is_new": ver.is_new,
         "fields": [
             {
                 "path": f.path, "mod_value": f.mod_value,
@@ -128,6 +144,7 @@ def _ver_from_cache(mod, hit, data: dict) -> FileVerification:
         mod_name=mod.name, entry=hit.entry, rel=hit.rel,
         pak=hit.pak, stored=hit.stored,
         status=data["status"], message=data["message"],
+        is_new=data.get("is_new", False),
         fields=[FieldIssue(**f) for f in data["fields"]],
     )
 
@@ -403,6 +420,9 @@ def _parse_mod_tree(entry: str, data: bytes, work_dir: Path, log) -> ET.Element:
     """Return the mod file's property tree root (Data element)."""
     if entry.lower().endswith((".exml", ".mxml")):
         text = data.decode("utf-8")
+        # Strip comments: authoring tools leave "--" inside them, which is
+        # illegal XML and would fail the parser (they carry no data).
+        text = re.sub(r"<!--.*?-->", "", text, flags=re.DOTALL)
         # Mod list-edit convention: valueless flag attributes like `_remove`
         # are not well-formed XML - give them empty values so the parser
         # accepts them.
@@ -515,6 +535,14 @@ def _duplicate_fields_note(mod_root, van_root=None) -> str:
     return "note: duplicated field(s) in this file: " + ", ".join(flagged)
 
 
+def _templates_equivalent(a: str | None, b: str | None) -> bool:
+    """Case/prefix-insensitive template equality (GcUIGlobals == cGcUIGlobals):
+    game builds drifted on the raw template spelling; the merge auto-fixes it."""
+    def norm(t: str | None) -> str:
+        return (t or "").lower().removeprefix("c")
+    return norm(a) == norm(b)
+
+
 def verify_scan(scan: dict, index: dict, log, only_mod: str | None = None) -> dict:
     """Verify every resolved mod file; ``only_mod`` restricts to one mod (recompute totals!).
 
@@ -552,6 +580,15 @@ def verify_scan(scan: dict, index: dict, log, only_mod: str | None = None) -> di
                     time.sleep(0)
                     last_yield = time.monotonic()
                 mod_data = _read_mod_data(mod, hit.entry)
+                if hit.stored not in _pak_file_set(index):
+                    # Scene-relative/new file: nothing to compare against.
+                    ver.status = FV_VERIFIED
+                    ver.message = "new file (not present in vanilla - added by this mod)"
+                    ver.is_new = True
+                    cache[key] = _ver_to_cache(ver)
+                    counts[ver.status] += 1
+                    verifications[(mod.name, hit.entry)] = ver
+                    continue
                 if is_raw_asset(hit.entry):
                     # Raw asset override (textures, shaders, audio, ...): no
                     # property tree to inspect - a byte difference IS the
@@ -576,7 +613,9 @@ def verify_scan(scan: dict, index: dict, log, only_mod: str | None = None) -> di
 
                 mod_template = mod_root.get("template") if mod_root.tag == "Data" else None
                 van_template = van_tree.get("template") if van_tree.tag == "Data" else None
-                if mod_template != van_template:
+                if mod_template != van_template and not _templates_equivalent(
+                    mod_template, van_template
+                ):
                     ver.status = FV_ERROR
                     ver.message = f"template mismatch: mod={mod_template} vanilla={van_template}"
                     ver.fields = [FieldIssue("<template>", mod_template, van_template, V_TEMPLATE)]

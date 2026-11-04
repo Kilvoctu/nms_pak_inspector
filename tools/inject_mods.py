@@ -174,8 +174,11 @@ def inject_mod(mod, index: dict, pcbanks: str, log) -> dict:
         try:
             for stored, (data, _rel) in entries.items():
                 if stored not in src.file_map:
-                    skipped.append((_rel, "path not present in the pak"))
-                    log(f"{_rel}: skipped - path not present in {pak_name}")
+                    skipped.append((_rel, "new file - pak injection cannot add files"))
+                    log(
+                        f"{_rel}: skipped - new file (pak injection adds no files; "
+                        "loose-install this mod instead)"
+                    )
                     continue
                 backup = _take_backup_path(pak_name, stored)
                 backup.parent.mkdir(parents=True, exist_ok=True)

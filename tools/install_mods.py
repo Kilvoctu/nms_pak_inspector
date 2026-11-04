@@ -62,11 +62,14 @@ def install_mod(mod, pcbanks: str, log) -> dict:
     count = 0
     for hit in sorted(mod.game_files, key=lambda h: h.entry):
         data = _read_mod_data(mod, hit.entry)
-        target = dest / hit.rel
+        # Scene-relative files resolve into the referencing scene's folder -
+        # install them at their resolved in-pak path, not their zip path.
+        rel = hit.stored if hit.match.startswith("scene-relative") else hit.rel
+        target = dest / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
-        if hit.rel.lower().endswith(".mxml"):
-            log(f"note: {hit.rel} is .MXML - the loose loader loads .MBIN/.EXML only")
+        if rel.lower().endswith(".mxml"):
+            log(f"note: {rel} is .MXML - the loose loader loads .MBIN/.EXML only")
         count += 1
     log(f"Installed {mod.name}: {count} file(s) -> {dest}")
     return {"installed": count, "dest": str(dest)}
