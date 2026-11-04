@@ -21,10 +21,10 @@ Simple tool that can verify, inspect, and install No Man's Sky mods. This app is
 - Checks mod files against No Man's Sky's pak data without touching the game files; shows what's broken, outdated, or has no effect anymore.
 - Inject mod data straight into the game's pak data, only changing what needs to be rewritten.
 - Or standard loose installation into `GAMEDATA\MODS` (mutually exclusive with injection).
-- Mod merged ability when multiple mods touch the same file.
+- Mod merge ability when multiple mods touch the same file.
 - Automatic pre-injection backups with byte-exact revert.
-- Per mod inline editor with side-by-side tree comparison with diff highlighting, preview, format auto-fix, raw-asset inspector.
-- Basic NexusMods support shows author, description, local and latest release, and mod page link. Needs a personal Nexus API key, set once via the menu.
+- Per mod inline editor with side-by-side tree comparison; diff highlighting, preview, format auto-fix, raw-asset inspector.
+- Basic NexusMods support shows author, description, local and latest release, and mod page link. Nexus API key required, no premium needed.
 - Automatically detects game updates (restored vanilla paks): clears injection state, rebuilds the index, and re-verifies everything.
 
 ## Notes
