@@ -136,6 +136,17 @@ def install_mod(mod, scan: dict, index: dict, pcbanks: str, log) -> dict:
     _save_state(state)
     result = rebuild(scan, index, pcbanks, log)
     log(f"Installed {mod.name}: {len(paths)} file(s) -> {MANAGED_FOLDER}")
+    rootless = [p for p in paths if "/" not in p]
+    if rootless:
+        # No vanilla file lives at GAMEDATA root, so these targets never load.
+        log(
+            f"WARNING: {len(rootless)} file(s) ship without a directory prefix and "
+            "won't load loose (likely a mod packaging issue):"
+        )
+        for p in rootless[:8]:
+            log(f"   {p}")
+        if len(rootless) > 8:
+            log(f"   … +{len(rootless) - 8} more")
     return {"installed": len(paths), "rebuilt": result["files"], "dest": str(managed_dir(pcbanks))}
 
 
