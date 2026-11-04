@@ -97,6 +97,7 @@ from .worker import (
     TaskWorker,
     compiler_status_worker,
     compiler_update_worker,
+    fields_prep_worker,
     index_worker,
     inject_all_worker,
     inject_group_worker,
@@ -2203,6 +2204,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("NMS Pak Inspector")
         self._settings = _settings()
         self._worker: TaskWorker | None = None
+        self._side_worker: TaskWorker | None = None  # side slot: Nexus fetches, editor prep (may overlap _worker)
         self._active_workers: set[TaskWorker] = set()
         self._index: dict | None = None
         self._index_stale = False
@@ -2277,6 +2279,12 @@ class MainWindow(QMainWindow):
         self._expanded_mods: set[str] | None = (
             None if raw_expanded is None else set(json.loads(raw_expanded or "[]"))
         )
+        self._expand_save_timer = QTimer(self)
+        self._expand_save_timer.setSingleShot(True)
+        self._expand_save_timer.setInterval(500)
+        self._expand_save_timer.timeout.connect(self._save_expanded_state)
+        self._tree.itemExpanded.connect(self._on_expand_changed)
+        self._tree.itemCollapsed.connect(self._on_expand_changed)
 
         self.installEventFilter(self)
         self.setMouseTracking(True)
@@ -2513,10 +2521,28 @@ class MainWindow(QMainWindow):
         worker.finished.connect(lambda w=worker: self._on_task_finished(w))
         worker.start()
 
+    def _start_side_task(self, fn, *args, on_done) -> None:
+        """Like _start_task but uses a separate slot: Nexus fetches may run
+        alongside inject/verify/install (they share no state with them)."""
+        if self._side_worker is not None:
+            self.append_log("A lookup is already running - please wait a moment")
+            return
+        worker = TaskWorker(fn, *args)
+        self._side_worker = worker
+        self._active_workers.add(worker)
+        self._title_bar.set_busy(True)
+        worker.log.connect(self.append_log)
+        worker.error.connect(self._on_task_error)
+        worker.done.connect(on_done)
+        worker.finished.connect(lambda w=worker: self._on_task_finished(w))
+        worker.start()
+
     def _on_task_finished(self, worker: TaskWorker) -> None:
         self._active_workers.discard(worker)
         if self._worker is worker:
             self._worker = None
+        if self._side_worker is worker:
+            self._side_worker = None
         self._title_bar.set_busy(False)
         self._refresh_actions()
         self._maybe_rescan_for_drop()
@@ -3203,7 +3229,9 @@ class MainWindow(QMainWindow):
         def done(result: dict) -> None:
             _NexusInfoDialog(mod_name, result, self).exec()
 
-        self._start_task(nexus_info_worker, self._nexus_key(), mod.path, on_done=done)
+        self._start_side_task(
+            nexus_info_worker, self._nexus_key(), mod.path, on_done=done
+        )
 
     def _toggle_maximized(self) -> None:
         if self.isMaximized():
@@ -3283,16 +3311,18 @@ class MainWindow(QMainWindow):
             dlg = _RawAssetDialog(ver, mod, hit, self._pcbanks, self)
             dlg.exec()
             return
-        van_mxml = verify_mods._extract_and_decompile(
-            self._pcbanks, ver.pak, ver.stored, self._index,
-            self.append_log, mbincompiler.ensure_compiler(),
+
+        def done(van_root) -> None:
+            dlg = _FieldDialog(ver, mod, hit, van_root, self)
+            dlg.exec()
+            if dlg.saved:
+                self.append_log(f"Saved edits to {ver.rel} - re-verifying…")
+                self._reverify_mod(ver.mod_name)
+
+        self._start_side_task(
+            fields_prep_worker, self._pcbanks, ver.pak, ver.stored, self._index,
+            on_done=done,
         )
-        van_root = ET.parse(van_mxml).getroot()
-        dlg = _FieldDialog(ver, mod, hit, van_root, self)
-        dlg.exec()
-        if dlg.saved:
-            self.append_log(f"Saved edits to {ver.rel} - re-verifying…")
-            self._reverify_mod(ver.mod_name)
 
     def _on_tree_double_clicked(self, item: QTreeWidgetItem, _column: int) -> None:
         data = item.data(0, Qt.ItemDataRole.UserRole)
@@ -3905,19 +3935,27 @@ class MainWindow(QMainWindow):
         self._settings.setValue(
             "window_maximized", self.isMaximized()
         )
-        # Remember which mods were expanded/collapsed.
-        expanded = [
-            self._tree.topLevelItem(i).text(0)
-            for i in range(self._tree.topLevelItemCount())
-            if self._tree.topLevelItem(i).isExpanded()
-        ]
-        self._settings.setValue("expanded_mods", json.dumps(expanded))
+        self._save_expanded_state()
         for column in range(len(_TREE_COLUMNS)):
             # Persist the width the user chose, not a flexed value.
             width = self._user_col_widths.get(column) or self._tree.columnWidth(column)
             self._settings.setValue(f"col_width_{column}", width)
         self._settings.sync()
         super().closeEvent(event)
+
+    def _save_expanded_state(self) -> None:
+        """Remember which mods were expanded/collapsed."""
+        expanded = [
+            self._tree.topLevelItem(i).text(0)
+            for i in range(self._tree.topLevelItemCount())
+            if self._tree.topLevelItem(i).isExpanded()
+        ]
+        self._settings.setValue("expanded_mods", json.dumps(expanded))
+
+    def _on_expand_changed(self, _item) -> None:
+        """Debounced save on every expand/collapse, so even an abrupt process
+        kill (IDE stop button, crash) loses at most the last moment."""
+        self._expand_save_timer.start()
 
 
 # --- module-level Qt shorthands used above ---------------------------------------

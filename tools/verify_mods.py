@@ -3,6 +3,7 @@
 import hashlib
 import re
 import shutil
+import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -457,6 +458,7 @@ def verify_scan(scan: dict, index: dict, log, only_mod: str | None = None) -> di
     counts = {FV_VERIFIED: 0, FV_NO_EFFECT: 0, FV_FORMAT: 0, FV_OUTDATED: 0, FV_ERROR: 0}
 
     work_dir = CACHE_DIR / "_modwork"
+    last_yield = time.monotonic()
     for mod in scan["mods"]:
         if only_mod is not None and mod.name != only_mod:
             continue
@@ -468,6 +470,9 @@ def verify_scan(scan: dict, index: dict, log, only_mod: str | None = None) -> di
                 pak=hit.pak, stored=hit.stored,
             )
             try:
+                if time.monotonic() - last_yield > 0.025:
+                    time.sleep(0)
+                    last_yield = time.monotonic()
                 mod_data = _read_mod_data(mod, hit.entry)
                 if is_raw_asset(hit.entry):
                     # Raw asset override (textures, shaders, audio, ...): no

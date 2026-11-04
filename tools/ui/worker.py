@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import time
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
 from zipfile import ZipFile
@@ -432,4 +433,15 @@ def nexus_info_worker(log, api_key: str, source_path: str) -> dict:
     except Exception as exc:  # noqa: BLE001 - shown in the dialog
         result["error"] = friendly_error(exc)
     return result
+
+
+def fields_prep_worker(log, pcbanks: str, pak: str, stored: str, index: dict):
+    """Extract + decompile the vanilla MBIN for the editor (off the GUI thread).
+
+    Returns the parsed vanilla root element."""
+    log(f"Preparing editor for {stored}…")
+    van_mxml = verify_mods._extract_and_decompile(
+        pcbanks, pak, stored, index, log, mbincompiler.ensure_compiler()
+    )
+    return ET.parse(van_mxml).getroot()
 

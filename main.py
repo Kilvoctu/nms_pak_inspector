@@ -31,6 +31,7 @@ def _lock_dir() -> Path:
 
 
 def main() -> None:
+    sys.setswitchinterval(0.002)
     app = QApplication(sys.argv)
     app.setApplicationName("NMS Pak Inspector")
     app.setStyle("Fusion")
