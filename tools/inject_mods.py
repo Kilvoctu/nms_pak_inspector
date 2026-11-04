@@ -93,7 +93,6 @@ def _swap_pak(pak_path: Path, changes: dict[str, bytes], log) -> dict:
     """Rewrite one pak with ``changes`` and atomically swap it in."""
     tmp = pak_path.with_suffix(".pak.injecting")
     name = pak_path.name
-
     def report(done: int, total: int) -> None:
         # 10% steps, plus a 20s heartbeat for slow stretches (huge paks crawl).
         step = done * 100 // total
@@ -105,6 +104,11 @@ def _swap_pak(pak_path: Path, changes: dict[str, bytes], log) -> dict:
     _state = [-1, 0.0]
     stats = paklib.inject(pak_path, changes, tmp, progress=report)
     os.replace(tmp, pak_path)
+    # Keep drift baselines in sync with intentional content so future audits
+    # only flag unexplained changes.
+    from . import audit_injected
+
+    audit_injected.update_baseline(pak_path.name, changes)
     log(
         f"wrote {pak_path.name}: {stats['files']} file(s), "
         f"{stats['chunks_copied']} chunk(s) copied verbatim, "

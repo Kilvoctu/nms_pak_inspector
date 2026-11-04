@@ -192,7 +192,7 @@ def inject(
 ) -> dict:
     """Rewrite `source` pak with `changes` applied into `out` (no new files: full re-chunk).
 
-    Untouched windows copy verbatim; a shifted tail re-chunks at ``bulk_level``; ``workers=1`` = serial, same bytes."""
+    Untouched windows copy verbatim only for strictly packed sources; game paks rebuild fully. ``workers=1``: serial."""
     src = Pak(source)
     names = list(src.filenames)
     added = [n for n in changes if n not in src.file_map]
@@ -235,10 +235,23 @@ def inject(
     chunk_count = _bins(total_padded, CHUNK_SIZE)
 
     # Windows [0, boundary) lie entirely before the first changed byte and can
-    # be copied verbatim from the source regardless of layout shifts.
+    # be copied verbatim from the source regardless of layout shifts - but ONLY
+    # if the source physically packs files in filepath-blob order with strict
+    # 0x10 padding. Game-written paks reorder/gap their data, so the copied
+    # bytes would sit under header positions computed for strict packing and
+    # every file before the first change would read as its neighbour's data.
+    def _packed_in_blob_order(src: Pak) -> bool:
+        cursor = _roundup16(len(src.filepath_data))
+        for name in src.filenames:
+            entry = src.file_map[name]
+            if entry[1] - src.data_offset != cursor:
+                return False
+            cursor += _roundup16(entry[2])
+        return True
+
     boundary = (first_change // CHUNK_SIZE) if first_change is not None else 0
     boundary = min(boundary, src.chunk_count)
-    verbatim = src.is_compressed and compress
+    verbatim = src.is_compressed and compress and _packed_in_blob_order(src)
     if not verbatim:
         boundary = 0
 

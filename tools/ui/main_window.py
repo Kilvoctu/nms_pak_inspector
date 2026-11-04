@@ -1155,7 +1155,10 @@ class _CompareTrees(QWidget):
                 "Remove duplicate copy (sibling pairs with vanilla)"
                 if heal else "Remove this entry"
             )
-            action.triggered.connect(lambda: self._apply_op("remove", elem))
+            action.triggered.connect(lambda: self._apply_op("delete", elem))
+            if not heal:
+                action_rm = menu.addAction("Remove from game (deletes from pak file)")
+                action_rm.triggered.connect(lambda: self._apply_op("remove", elem))
             action2 = menu.addAction("Insert duplicate as new list entry")
             action2.triggered.connect(lambda: self._apply_op("insert", elem))
             conformed = _format_drift(elem, self._paired_van(elem))

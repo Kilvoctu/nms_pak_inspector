@@ -1,8 +1,9 @@
 """Static crash-risk audit of the currently injected mods (no game boot needed).
 
-Checks each baked file vs its pre-image: MBIN round-trip + template drift, DDS headers, SPIR-V, pak integrity."""
+Checks baked files vs pre-images (MBIN/DDS/SPV), sweeps whole paks against drift baselines, validates backups."""
 
 import hashlib
+import json
 import struct
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -12,15 +13,65 @@ from .inject_mods import BACKUP_DIR, load_state
 from .verify_mods import _templates_equivalent
 
 WORK_ROOT = repo.cache_dir() / "_auditwork"
+BASELINE_DIR = repo.cache_dir() / "audit_baselines"
 
 # Paths the game parses before the title screen: crashes here are boot crashes.
 BOOT_PREFIXES = ("metadata/reality/", "globals/", "pipelines/", "ui/boot/", "shaders/")
 
 _SEV_ORDER = {"risk": 0, "warn": 1, "info": 2, "ok": 3}
+_MBIN_HEADS = {bytes.fromhex("cccccccccccccccce40c0000"), bytes.fromhex("cccccccccccccccce40c0400")}
 
 
 def _boot_critical(stored: str) -> bool:
     return stored.startswith(BOOT_PREFIXES)
+
+
+def _fingerprint(data: bytes) -> list:
+    """Cheap per-file drift reference: full size + hash of the first 256 bytes."""
+    return [len(data), hashlib.md5(data[:256]).hexdigest()]
+
+
+def _baseline_path(pak: str) -> Path:
+    return BASELINE_DIR / f"{hashlib.md5(pak.encode()).hexdigest()[:16]}.json"
+
+
+def load_baseline(pak: str) -> dict:
+    p = _baseline_path(pak)
+    if p.exists():
+        return json.loads(p.read_text())
+    return {}
+
+
+def save_baseline(pak: str, baseline: dict) -> None:
+    BASELINE_DIR.mkdir(parents=True, exist_ok=True)
+    _baseline_path(pak).write_text(json.dumps(baseline))
+
+
+def update_baseline(pak: str, contents: dict[str, bytes]) -> None:
+    """Record post-swap fingerprints for paths the injector just wrote (never raises)."""
+    try:
+        baseline = load_baseline(pak)
+        for stored, data in contents.items():
+            baseline[stored] = _fingerprint(data)
+        save_baseline(pak, baseline)
+    except (OSError, ValueError):  # baselines must never break injections
+        pass
+
+
+def _container_problem(stored: str, data: bytes) -> str | None:
+    """Extension-aware container check; None = pass or (for .mbin) legitimately variant."""
+    suffix = stored.rsplit(".", 1)[-1].lower()
+    if suffix == "mbin":
+        if data[:8] == bytes.fromhex("cccccccccccccccc") and data[8:12] not in (
+            bytes.fromhex("e40c0000"), bytes.fromhex("e40c0400"),
+        ):
+            return f"mbin header version field unexpected: {data[8:12].hex()}"
+        return None  # non-MBIN-magic .mbin files exist legitimately in game paks
+    if suffix == "dds" and (len(data) < 128 or data[:4] != b"DDS "):
+        return "not a valid DDS (bad magic or truncated header)"
+    if suffix == "spv" and data[:4] != b"\x03\x02\x23\x07":
+        return "not a SPIR-V module (bad magic)"
+    return None
 
 
 def _dds_header(data: bytes) -> dict | None:
@@ -118,8 +169,10 @@ def audit_injections(pcbanks: str, log) -> dict:
             add("-", pak, "(whole pak)", "risk", f"pak failed to open: {exc}")
             continue
         try:
+            state_paths = set()
             for mod, f in sorted(items, key=lambda x: x[1]["stored"]):
                 stored = f["stored"]
+                state_paths.add(stored)
                 pre = BACKUP_DIR / f["backup"]
                 try:
                     baked = pk.read_file(stored)
@@ -130,6 +183,7 @@ def audit_injections(pcbanks: str, log) -> dict:
                 if pre_bytes is None:
                     add(mod, pak, stored, "warn", "pre-injection backup missing")
                     continue
+                _audit_backup(mod, pak, stored, pre_bytes, add)
                 suffix = stored.rsplit(".", 1)[-1].lower()
                 stem = hashlib.md5(f"{pak}|{stored}".encode()).hexdigest()[:12]
                 if suffix == "mbin":
@@ -143,6 +197,48 @@ def audit_injections(pcbanks: str, log) -> dict:
                         add(mod, pak, stored, "warn", "baked bytes equal vanilla (no-op bake)")
                     else:
                         add(mod, pak, stored, "ok", "raw override differs from vanilla as expected")
+
+            # Full-pak sweep: every file (injected or not) vs its drift baseline.
+            baseline = load_baseline(pak)
+            created = not baseline
+            drift = 0
+            swept = 0
+            entries = sorted(
+                ((pk.file_map[n][1], n) for n in pk.filenames if n in pk.file_map),
+            )
+            for _abs_off, name in entries:
+                try:
+                    data = pk.read_file(name)
+                except Exception as exc:  # noqa: BLE001
+                    if name not in state_paths:
+                        add("(pak sweep)", pak, name, "risk", f"unreadable: {exc}")
+                        drift += 1
+                    continue
+                swept += 1
+                problem = _container_problem(name, data)
+                if problem is not None:
+                    add("(pak sweep)", pak, name, "risk", f"container check failed: {problem}")
+                    drift += 1
+                if name in state_paths:
+                    baseline[name] = _fingerprint(data)  # injected: known-intentional
+                    continue
+                fp = _fingerprint(data)
+                if name in baseline:
+                    if baseline[name] != fp:
+                        add(
+                            "(pak sweep)", pak, name, "risk",
+                            f"content drift vs baseline (size {baseline[name][0]:,} -> {fp[0]:,}); "
+                            "untouched by current injections",
+                        )
+                        drift += 1
+                else:
+                    baseline[name] = fp
+            save_baseline(pak, baseline)
+            note = "baseline created" if created else f"{drift} drift finding(s)"
+            add(
+                "(pak sweep)", pak, "(all files)", "info" if not drift else "warn",
+                f"swept {swept:,} file(s); {note}",
+            )
         finally:
             pk.close()
 
@@ -153,6 +249,22 @@ def audit_injections(pcbanks: str, log) -> dict:
     summary = f"audited {total} injected file(s): {risks} risk, {warns} warn"
     log(summary)
     return {"findings": findings, "summary": summary}
+
+
+def _audit_backup(mod: str, pak: str, stored: str, pre: bytes, add) -> None:
+    """Container-check a pre-image backup: restoring garbage would re-bake corruption."""
+    problem = _container_problem(stored, pre)
+    if problem is not None:
+        add(
+            mod, pak, stored, "risk",
+            f"pre-injection backup fails container check ({problem}); reverting would write corruption",
+        )
+    elif stored.lower().endswith(".mbin") and pre[:8] != bytes.fromhex("cccccccccccccccc"):
+        add(
+            mod, pak, stored, "warn",
+            "backup lacks an MBIN header - legitimate for variant game data, but verify this "
+            "is expected before reverting",
+        )
 
 
 def _audit_mbin(mod: str, pak: str, stored: str, baked: bytes, pre: bytes, stem: str, add) -> None:
