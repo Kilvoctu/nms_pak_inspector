@@ -9,7 +9,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import mbincompiler, merge_mods, paklib, repo
-from .verify_mods import _extract_and_decompile, _parse_mod_tree, _read_mod_data
+from .verify_mods import (
+    _extract_and_decompile,
+    _parse_mod_tree,
+    _read_mod_data,
+    is_raw_asset,
+)
 
 STATE_FILE = repo.inject_state_file()
 BACKUP_DIR = repo.inject_backup_dir()
@@ -274,6 +279,44 @@ def _merged_content(participants: list, van_root, work: Path, resolutions,
     return merge_mods.merged_to_mbin(merged, work, stem)
 
 
+def _raw_bytes_for(parts: list, resolutions: dict | None, stored: str, log) -> tuple[bytes | None, str]:
+    """Content for a shared raw (non-MBIN) pak path: identical bytes pass through.
+
+    Differing bytes need a dialog winner (``resolutions`` keyed by stored path); else (None, reason)."""
+    datas = [_read_mod_data(mod, hit.entry) for mod, hit in parts]
+    if len(set(datas)) == 1:
+        return datas[0], f"raw file, identical bytes from {len(parts)} mod(s)"
+    winner = (resolutions or {}).get(stored)
+    if winner is None or not 0 <= winner < len(datas):
+        names = ", ".join(m.name for m, _h in parts)
+        return None, f"raw bytes differ between {names} - needs a merge-dialog winner"
+    return datas[winner], f"raw bytes, winner: {parts[winner][0].name}"
+
+
+def _raw_preview_entry(parts: list) -> dict:
+    """Preview entry for a raw (non-MBIN) path; differing bytes become a winner choice."""
+    datas = [_read_mod_data(mod, hit.entry) for mod, hit in parts]
+    conflicts = []
+    if len(set(datas)) > 1:
+        conflicts = [
+            merge_mods.MergeConflict(
+                path=parts[0][1].stored,
+                choices=[
+                    (i, f"{m.name}: {len(d):,} bytes")
+                    for i, (d, (m, _h)) in enumerate(zip(datas, parts))
+                ],
+            )
+        ]
+    hit0 = parts[0][1]
+    return {
+        "pak": hit0.pak,
+        "stored": hit0.stored,
+        "participants": [m.name for m, _h in parts],
+        "conflicts": conflicts,
+        "raw": True,
+    }
+
+
 def merge_preview(mod_names: list[str], scan: dict, index: dict, pcbanks: str,
                   log) -> dict:
     """Compute what a group injection WOULD do (no injection, no state)."""
@@ -295,6 +338,9 @@ def merge_preview(mod_names: list[str], scan: dict, index: dict, pcbanks: str,
 
     files: dict[str, dict] = {}
     for (pak_name, stored), parts in sorted(participants.items()):
+        if is_raw_asset(parts[0][1].entry):
+            files[f"{pak_name}|{stored}"] = _raw_preview_entry(parts)
+            continue
         van_mxml = _extract_and_decompile(pcbanks, pak_name, stored, index, log, compiler)
         van_root = _vanilla_root(van_mxml)
         mod_roots = [
@@ -348,6 +394,15 @@ def inject_group(mod_names: list[str], scan: dict, index: dict, pcbanks: str,
     for (pak_name, stored), parts in sorted(participants.items()):
         done += 1
         rel0 = parts[0][1].rel
+        if is_raw_asset(rel0):
+            data, note = _raw_bytes_for(parts, resolutions, stored, log)
+            if data is None:
+                skipped.append((rel0, note))
+                log(f"[{done}/{total}] {rel0}: skipped - {note}")
+                continue
+            prepared.setdefault(pak_name, {})[stored] = data
+            log(f"[{done}/{total}] {rel0}: {note}")
+            continue
         try:
             van_mxml = _extract_and_decompile(
                 pcbanks, pak_name, stored, index, log, compiler
@@ -362,11 +417,12 @@ def inject_group(mod_names: list[str], scan: dict, index: dict, pcbanks: str,
         note = f"merged {len(parts)} mod edit(s)" if len(parts) > 1 else "merged"
         log(f"[{done}/{total}] {rel0}: {note}")
 
-    # Snapshot + swap per pak (shared backups for the whole group event).
+    # Snapshot + swap per pak, recording state after each pak so a failure
+    # partway leaves accurate records (same pattern as inject_mod).
     injected_paths_done: set[tuple[str, str]] = set()
+    all_backups: dict[tuple[str, str], str] = {}
     for pak_name, entries in sorted(prepared.items()):
         pak_path = Path(pcbanks) / pak_name
-        backups: dict[str, str] = {}
         changes: dict[str, bytes] = {}
         src = paklib.Pak(pak_path)
         try:
@@ -376,43 +432,44 @@ def inject_group(mod_names: list[str], scan: dict, index: dict, pcbanks: str,
                 backup = _take_backup_path(pak_name, stored)
                 backup.parent.mkdir(parents=True, exist_ok=True)
                 backup.write_bytes(src.read_file(stored))
-                backups[stored] = backup.name
+                all_backups[(pak_name, stored)] = backup.name
                 changes[stored] = data
         finally:
             src.close()
-        if changes:
-            _swap_pak(pak_path, changes, log)
-            injected_paths_done.update(
-                (pak_name, stored) for stored in changes
-            )
-            _refresh_index(index, pak_name, pak_path)
-
-    # State: new members get entries referencing this event's backups;
-    # already-injected members keep theirs (their own backups stay valid).
-    next_order = max((s.get("order", 0) for s in state.values()), default=0)
-    baked_counts: dict[str, int] = {}
-    for mod in mods:
-        files = state.get(mod.name, {}).get("files", [])
-        have = {(f["pak"], f["stored"]) for f in files}
-        for hit in mod.game_files:
-            key = (hit.pak, hit.stored)
-            if key not in injected_paths_done or key in have:
+        if not changes:
+            continue
+        _swap_pak(pak_path, changes, log)
+        _refresh_index(index, pak_name, pak_path)
+        injected_paths_done.update((pak_name, stored) for stored in changes)
+        # State: new members get entries referencing this event's backups;
+        # already-injected members keep theirs (their own backups stay valid).
+        baked = {(pak_name, stored) for stored in changes}
+        next_order = max((s.get("order", 0) for s in state.values()), default=0)
+        for mod in mods:
+            files = state.get(mod.name, {}).get("files", [])
+            have = {(f["pak"], f["stored"]) for f in files}
+            added = [
+                {"pak": hit.pak, "stored": hit.stored, "rel": hit.rel,
+                 "backup": all_backups[(hit.pak, hit.stored)]}
+                for hit in mod.game_files
+                if (hit.pak, hit.stored) in baked and (hit.pak, hit.stored) not in have
+            ]
+            if not added:
                 continue
-            files.append({
-                "pak": hit.pak, "stored": hit.stored, "rel": hit.rel,
-                "backup": backups[hit.stored],
-            })
-        if mod.name not in state:
-            next_order += 1
-            state[mod.name] = {
-                "order": next_order,
-                "injected_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                "files": files,
-            }
-        else:
-            state[mod.name]["files"] = files
-        baked_counts[mod.name] = len(files)
-    save_state(state)
+            if mod.name not in state:
+                next_order += 1
+                state[mod.name] = {
+                    "order": next_order,
+                    "injected_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    "files": files + added,
+                }
+            else:
+                state[mod.name]["files"] = files + added
+        save_state(state)
+
+    baked_counts = {
+        mod.name: len(state.get(mod.name, {}).get("files", [])) for mod in mods
+    }
     shutil.rmtree(work, ignore_errors=True)
 
     log(
@@ -464,6 +521,13 @@ def reapply_merged(reverted_paths: set[tuple[str, str]], scan: dict, index: dict
             if hit is not None:
                 parts.append((mod, hit))
         if not parts:
+            continue
+        if is_raw_asset(parts[0][1].entry):
+            data, note = _raw_bytes_for(parts, None, stored, log)
+            if data is None:
+                log(f"re-apply of {stored} skipped - {note}")
+                continue
+            changes_by_pak.setdefault(pak_name, {})[stored] = data
             continue
         try:
             van_mxml = _extract_and_decompile(

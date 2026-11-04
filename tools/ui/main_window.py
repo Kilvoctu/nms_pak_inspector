@@ -604,16 +604,25 @@ class _MergedPreview(QTreeWidget):
         merged, _notes = merge_mods.merge_tree(mod_root, van_root)
         self.set_merged(merged, van_root)
 
-    def set_merged(self, merged_root, van_root) -> None:
+    def set_merged(self, merged_root, van_root, changed_only: bool = False) -> None:
         self.clear()
         self._fill(
             list(merged_root.findall("Property")),
             list(van_root.findall("Property")),
             self.invisibleRootItem(),
+            changed_only,
         )
         self.expandAll()
 
-    def _fill(self, merged_props, van_props, parent_item) -> None:
+    def set_raw_note(self, text: str) -> None:
+        """Raw (non-MBIN) file: no merge tree - show a single note item."""
+        self.clear()
+        item = QTreeWidgetItem(self, [text])
+        item.setForeground(0, COLOR_DIM)
+        self.expandAll()
+
+    def _fill(self, merged_props, van_props, parent_item, changed_only=False) -> bool:
+        """Build items; returns whether anything was kept (changed_only prunes the rest)."""
         van_by_name: dict[str | None, list] = {}
         for vp in van_props:
             van_by_name.setdefault(vp.get("name"), []).append(vp)
@@ -633,6 +642,7 @@ class _MergedPreview(QTreeWidget):
             consumed[name] = i + 1
             return cands[i] if i < len(cands) else None
 
+        kept = False
         for mp in merged_props:
             name = mp.get("name")
             mid, mindex = mp.get("_id"), mp.get("_index")
@@ -653,22 +663,38 @@ class _MergedPreview(QTreeWidget):
                 item.setForeground(0, COLOR_MERGE if inserted else QBrush())
                 if inserted:
                     item.setText(0, f"{label}  (inserted)")
-                self._fill(children, list(vp.findall("Property")) if vp is not None else [], item)
+                sub = self._fill(
+                    children, list(vp.findall("Property")) if vp is not None else [],
+                    item, changed_only,
+                )
+                if changed_only and not (sub or inserted):
+                    parent_item.removeChild(item)
+                else:
+                    kept = True
                 continue
             value = mp.get("value")
             if value is None:
+                if changed_only:
+                    continue
                 item = QTreeWidgetItem(parent_item, [label])
                 item.setForeground(0, QBrush())
                 continue
             text = f"{label} = {value}"
+            changed = inserted or (
+                vp is not None and not vp.findall("Property") and vp.get("value") != value
+            )
+            if changed_only and not changed:
+                continue
             item = QTreeWidgetItem(parent_item, [text])
             if inserted:
                 item.setText(0, f"{text}  (inserted)")
                 item.setForeground(0, COLOR_CLEAN)
-            elif vp is not None and not vp.findall("Property") and vp.get("value") != value:
+            elif changed:
                 item.setForeground(0, COLOR_MERGE)
             else:
                 item.setForeground(0, QBrush())
+            kept = True
+        return kept
 
 
 class _TreeValueDelegate(QStyledItemDelegate):
@@ -723,7 +749,13 @@ class _CompareTrees(QWidget):
         self._search.textChanged.connect(lambda _t: self.rebuild())
         top.addWidget(self._search, 1)
         self._changed_only = QCheckBox("Changed only", self)
-        self._changed_only.toggled.connect(lambda _c: self.rebuild())
+        # Persisted globally (shared with the merge dialog's preview filter).
+        self._changed_only.blockSignals(True)
+        self._changed_only.setChecked(
+            _settings().value("changed_only", False) in (True, "true")
+        )
+        self._changed_only.blockSignals(False)
+        self._changed_only.toggled.connect(self._on_changed_only)
         top.addWidget(self._changed_only)
         layout.addLayout(top)
 
@@ -768,6 +800,11 @@ class _CompareTrees(QWidget):
         self._right.customContextMenuRequested.connect(self._on_right_menu)
 
     # --- building -----------------------------------------------------------
+
+    def _on_changed_only(self, checked: bool) -> None:
+        """Persist the global preference, then rebuild with the new filter."""
+        _settings().setValue("changed_only", checked)
+        self.rebuild()
 
     def rebuild(self) -> None:
         needle = self._search.text().strip().lower()
@@ -1603,6 +1640,19 @@ class _MergeDialog(QDialog):
                 self._file_combo.addItem(file["stored"], key)
             self._file_combo.currentIndexChanged.connect(self._refresh_preview)
             selector_row.addWidget(self._file_combo, 1)
+            self._changed_only = QCheckBox("Changed only", self)
+            # Same global preference as the compare trees; checked state is
+            # applied before the connect so the initial render picks it up.
+            self._changed_only.setChecked(
+                _settings().value("changed_only", False) in (True, "true")
+            )
+            self._changed_only.toggled.connect(
+                lambda c: _settings().setValue("changed_only", c)
+            )
+            self._changed_only.toggled.connect(
+                lambda _c: self._refresh_preview(self._file_combo.currentIndex())
+            )
+            selector_row.addWidget(self._changed_only)
             layout.addLayout(selector_row)
             self._merge_preview = _MergedPreview(self)
             layout.addWidget(self._merge_preview, 2)
@@ -1614,11 +1664,12 @@ class _MergeDialog(QDialog):
         self._always_first.setChecked(
             _settings().value("merge_first_wins", False) in (True, "true")
         )
-        if n_conflicts:
-            layout.addWidget(self._always_first)
+        # Always lay it out: a parented widget left out of the layout floats
+        # at (0, 0) over the header (the jank seen with 0 conflicts).
+        layout.addWidget(self._always_first)
 
         buttons = QHBoxLayout()
-        inject_btn = QPushButton("Merge & inject")
+        inject_btn = QPushButton("Merge && inject")
         inject_btn.clicked.connect(self._on_inject)
         buttons.addWidget(inject_btn)
         cancel = QPushButton("Cancel")
@@ -1638,10 +1689,20 @@ class _MergeDialog(QDialog):
         if key is None:
             return
         file = self._preview["files"][key]
+        if file.get("raw"):
+            self._merge_preview.set_raw_note(
+                "Raw file (no field merge) - all mods ship identical bytes."
+                if not file["conflicts"]
+                else "Raw file (no field merge) - the mods ship different bytes;"
+                " the winner chosen below is baked in."
+            )
+            return
         merged, _notes, _conflicts = merge_mods.merge_many(
             file["mod_roots"], file["van_root"], self.resolutions or None
         )
-        self._merge_preview.set_merged(merged, file["van_root"])
+        self._merge_preview.set_merged(
+            merged, file["van_root"], self._changed_only.isChecked()
+        )
 
     def _on_inject(self) -> None:
         if self._always_first.isChecked():
@@ -2360,15 +2421,6 @@ class MainWindow(QMainWindow):
         game_row.addWidget(self._game_edit, 1)
         self._game_browse_btn = QPushButton("Browse…", central)
         game_row.addWidget(self._game_browse_btn)
-        game_row.addSpacing(12)
-        self._inject_all_btn = QPushButton("Inject all", central)
-        self._inject_all_btn.setEnabled(False)
-        self._inject_all_btn.clicked.connect(self._on_inject_all)
-        game_row.addWidget(self._inject_all_btn)
-        self._restore_btn = QPushButton("Restore vanilla", central)
-        self._restore_btn.setEnabled(False)
-        self._restore_btn.clicked.connect(self._on_restore_vanilla)
-        game_row.addWidget(self._restore_btn)
         layout.addLayout(game_row)
 
         self._index_status = QLabel("Index: loading…", central)
@@ -2400,11 +2452,15 @@ class MainWindow(QMainWindow):
             "QTreeWidget::item:hover {"
             f" background-color: rgba({accent.red()}, {accent.green()}, {accent.blue()}, 40%);"
             " }"
+            # Translucent accent instead of the opaque system Highlight color,
+            # which drowns the per-row status text.
+            "QTreeWidget::item:selected {"
+            f" background-color: rgba({accent.red()}, {accent.green()}, {accent.blue()}, 30%);"
+            " }"
         )
         self._tree.setItemDelegate(
             _RowActionDelegate(self._tree, self._on_row_action)
         )
-        layout.addWidget(self._tree, 3)
         layout.addWidget(self._tree, 3)
 
         self._log_view = QPlainTextEdit(central)
@@ -2441,8 +2497,11 @@ class MainWindow(QMainWindow):
         rescan.triggered.connect(self._scan_mods)
         reindex = menu.addAction("Rebuild pak index")
         reindex.triggered.connect(self._on_rebuild_index)
-        inject_all = menu.addAction("Inject all mods")
-        inject_all.triggered.connect(self._on_inject_all)
+        self._restore_action = menu.addAction("Restore vanilla")
+        self._restore_action.setEnabled(False)
+        self._restore_action.triggered.connect(self._on_restore_vanilla)
+        self._inject_all_action = menu.addAction("Inject all mods")
+        self._inject_all_action.triggered.connect(self._on_inject_all)
         menu.addSeparator()
         expand_all = menu.addAction("Expand all")
         expand_all.triggered.connect(self._tree.expandAll)
@@ -2565,6 +2624,8 @@ class MainWindow(QMainWindow):
 
     def _on_task_error(self, message: str) -> None:
         self.append_log(f"ERROR: {message}", color=COLOR_ERROR)
+        if not self._log_view.isVisible():
+            self._log_view.setVisible(True)  # an error must never be invisible
         if self._injecting_mod is not None or self._installing_mod is not None:
             # A failed action must not leave its button stuck mid-state.
             self._injecting_mod = None
@@ -3378,17 +3439,17 @@ class MainWindow(QMainWindow):
     def _refresh_actions(self) -> None:
         busy = self._worker is not None
         if self._inject_state:
-            self._restore_btn.setEnabled(not busy)
-            self._restore_btn.setToolTip(
+            self._restore_action.setEnabled(not busy)
+            self._restore_action.setToolTip(
                 f"Reverts all {len(self._inject_state)} injected mod(s), restoring "
                 "the vanilla pak bytes from the managed pre-injection backups"
             )
         else:
-            self._restore_btn.setEnabled(False)
-            self._restore_btn.setToolTip("Nothing is injected into the paks")
+            self._restore_action.setEnabled(False)
+            self._restore_action.setToolTip("Nothing is injected into the paks")
         eligible = self._eligible_mods()
-        self._inject_all_btn.setEnabled(not busy and bool(eligible))
-        self._inject_all_btn.setToolTip(
+        self._inject_all_action.setEnabled(not busy and bool(eligible))
+        self._inject_all_action.setToolTip(
             f"Injects {len(eligible)} eligible mod(s), merging mods that share pak files"
             if eligible
             else "No injectable mods (all injected, installed, or blocked by verification)"
