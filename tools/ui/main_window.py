@@ -433,7 +433,9 @@ class _CollisionDialog(QDialog):
                     K_DUPLICATE: "duplicate (same value)",
                 }[c.kind]
                 title = QLabel(f"{c.path}  —  {kind_text}")
-                title.setForeground(color)
+                title.setStyleSheet(
+                    f"color: rgb({color.red()}, {color.green()}, {color.blue()});"
+                )
                 layout.addWidget(title)
                 for mod_name, value in sorted(c.edits.items()):
                     row = QLabel(f"      {mod_name} = {value}")
@@ -2764,10 +2766,12 @@ class MainWindow(QMainWindow):
             item.setText(2, _FIELDS_LABEL[worst])
             item.setForeground(2, _FIELDS_COLOR[worst])
         conflict_map = {
-            c.stored: c for c in (self._conflicts or []) if c.kind == K_CONFLICT
+            c.stored: c for c in (self._conflicts or [])
+            if c.kind == K_CONFLICT and mod.name in c.edits
         }
         ambiguous_map = {
-            c.stored: c for c in (self._conflicts or []) if c.kind == K_AMBIGUOUS
+            c.stored: c for c in (self._conflicts or [])
+            if c.kind == K_AMBIGUOUS and mod.name in c.edits
         }
         collisions: dict[str, list[str]] = self._scan["collisions"]
         for i in range(item.childCount()):
@@ -2955,21 +2959,25 @@ class MainWindow(QMainWindow):
         )
         collisions: dict[str, list[str]] = self._scan["collisions"]
         mods: list[ModScan] = self._scan["mods"]
-        conflict_map = {
-            c.stored: c for c in (self._conflicts or []) if c.kind == K_CONFLICT
-        }
-        ambiguous_map = {
-            c.stored: c for c in (self._conflicts or []) if c.kind == K_AMBIGUOUS
-        }
 
         for mod in mods:
             game_files = mod.game_files
-            mod_conflicts = {h.stored for h in game_files if h.stored in conflict_map}
+            # Only conflicts THIS mod participates in (its name among the
+            # editors) mark it conflicted; merely shipping the same file as
+            # two fighting mods stays a plain merge.
+            mod_conflicts = {
+                c.stored: c for c in (self._conflicts or [])
+                if c.kind == K_CONFLICT and mod.name in c.edits
+            }
+            mod_ambiguous = {
+                c.stored: c for c in (self._conflicts or [])
+                if c.kind == K_AMBIGUOUS and mod.name in c.edits
+            }
             mod_shared = {h.stored for h in game_files if h.stored in collisions}
             if mod_conflicts:
                 status = ST_CONFLICT
             elif mod_shared or (
-                any(h.stored in ambiguous_map for h in game_files)
+                any(h.stored in mod_ambiguous for h in game_files)
             ):
                 status = ST_MERGE
             elif mod.has_unmatched:
@@ -3030,9 +3038,9 @@ class MainWindow(QMainWindow):
                     else None
                 )
                 if hit.stored is not None:
-                    if hit.stored in conflict_map:
+                    if hit.stored in mod_conflicts:
                         child_status = ST_CONFLICT
-                    elif hit.stored in ambiguous_map or hit.stored in collisions:
+                    elif hit.stored in mod_ambiguous or hit.stored in collisions:
                         child_status = ST_MERGE
                     else:
                         child_status = ST_CLEAN
@@ -3048,8 +3056,8 @@ class MainWindow(QMainWindow):
                                 n for n in collisions[hit.stored] if n != mod.name
                             )
                         )
-                    if hit.stored in conflict_map:
-                        c = conflict_map[hit.stored]
+                    if hit.stored in mod_conflicts:
+                        c = mod_conflicts[hit.stored]
                         tip += "\nCONFLICT on " + c.path + ": " + "; ".join(
                             f"{m} = {v}" for m, v in sorted(c.edits.items())
                         )
@@ -3269,11 +3277,27 @@ class MainWindow(QMainWindow):
                 mod_path = next(
                     (m.path for m in self._scan["mods"] if m.name == data[1]), None
                 )
+                collided = sorted(
+                    stored for stored, owners in self._scan["collisions"].items()
+                    if data[1] in owners
+                ) if self._scan else []
                 if mod_path:
                     info = menu.addAction("Info…")
                     info.triggered.connect(
                         lambda checked=False, n=data[1]: self._on_nexus_info(n)
                     )
+                    if len(collided) == 1:
+                        action = menu.addAction("Inspect collision…")
+                        action.triggered.connect(
+                            lambda checked=False, s=collided[0]: self._show_collision(s)
+                        )
+                    elif collided:
+                        sub = menu.addMenu("Inspect collision…")
+                        for stored in collided:
+                            act = sub.addAction(stored)
+                            act.triggered.connect(
+                                lambda checked=False, s=stored: self._show_collision(s)
+                            )
                     action = menu.addAction("Open in Explorer")
                     action.triggered.connect(
                         lambda: _open_in_explorer(mod_path)
