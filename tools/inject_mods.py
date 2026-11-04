@@ -266,13 +266,26 @@ def revert_mod(mod_name: str, scan: dict, index: dict, pcbanks: str, log,
 
 
 def revert_all(scan: dict, index: dict, pcbanks: str, log) -> dict:
-    """Revert every injected mod newest-first (reverse order unwinds the chain to exact vanilla)."""
+    """Revert every injected mod newest-first (unwinds to vanilla); a failing mod is logged, stays retryable."""
     state = load_state()
     names = sorted(state, key=lambda n: state[n].get("order", 0), reverse=True)
+    failures: list[tuple[str, str]] = []
+    reverted = 0
     for name in names:
-        revert_mod(name, scan, index, pcbanks, log, reapply=False)
-    log(f"Restore vanilla complete: {len(names)} injected mod(s) reverted")
-    return {"reverted": len(names)}
+        try:
+            revert_mod(name, scan, index, pcbanks, log, reapply=False)
+            reverted += 1
+        except Exception as exc:  # noqa: BLE001 - one stuck pak must not stop the rest
+            failures.append((name, f"{type(exc).__name__}: {exc}"))
+            log(f"revert of {name} FAILED: {exc} - it stays injected and retryable")
+    if failures:
+        log(
+            f"Restore vanilla finished with {len(failures)} failure(s): "
+            + "; ".join(n for n, _ in failures)
+            + " - close the game and run Restore vanilla again"
+        )
+    log(f"Restore vanilla complete: {reverted} injected mod(s) reverted")
+    return {"reverted": reverted, "failures": failures}
 
 
 # --- group (merged) injection ----------------------------------------------------

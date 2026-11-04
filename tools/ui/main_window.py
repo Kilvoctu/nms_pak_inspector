@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from zipfile import ZipFile
@@ -3756,6 +3757,32 @@ class MainWindow(QMainWindow):
         else:
             self._on_install_button(mod_name)
 
+    def _nms_running(self) -> bool:
+        """True if No Man's Sky is running (pak swaps fail while it holds the files)."""
+        try:
+            out = subprocess.run(
+                ["tasklist", "/FI", "IMAGENAME eq NMS.exe", "/NH"],
+                capture_output=True, text=True, timeout=10, check=False,
+                creationflags=repo._SUBPROCESS_FLAGS,
+            ).stdout
+        except Exception:  # noqa: BLE001 - detection is best-effort
+            return False
+        return "nms.exe" in out.lower()
+
+    def _pre_flight(self) -> bool:
+        """Guard before pak-mutating actions: warn if the game holds the paks."""
+        if self._nms_running():
+            answer = QMessageBox.question(
+                self, "No Man's Sky is running",
+                "The game appears to be running - pak swaps will fail with "
+                "access-denied while it holds the pak files.\n\n"
+                "Close the game first. Proceed anyway?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return False
+        return True
+
     def _on_inject_button(self, mod_name: str) -> None:
         if self._worker is not None:
             return
@@ -3773,6 +3800,14 @@ class MainWindow(QMainWindow):
                     "(or update the mod for the current game version)",
                     color=COLOR_ERROR,
                 )
+                return
+            if not self._pre_flight():
+                return
+            mod = next((m for m in self._scan["mods"] if m.name == mod_name), None)
+            new_hits = (
+                [h for h in mod.hits if h.pak is None and not h.skipped] if mod else []
+            )
+            if new_hits and not self._warn_new_files(mod_name, new_hits):
                 return
             partners = self._injected_collision_partners(mod_name)
             if partners:
@@ -3792,6 +3827,22 @@ class MainWindow(QMainWindow):
                 inject_mod_worker, mod_name, self._scan, self._index,
                 self._current_pcbanks(), on_done=self._on_inject_done,
             )
+
+    def _warn_new_files(self, mod_name: str, new_hits: list) -> bool:
+        """Pak injection cannot add files; warn when a mod ships ones no pak has."""
+        listing = "\n".join(f"   {h.rel}" for h in new_hits[:6])
+        more = f"\n   … +{len(new_hits) - 6} more" if len(new_hits) > 6 else ""
+        answer = QMessageBox.question(
+            self, "Mod contains new files",
+            f"{mod_name} contains {len(new_hits)} file(s) that don't exist in any "
+            f"vanilla pak:\n\n{listing}{more}\n\n"
+            "Pak injection cannot add new files - the mod may end up referencing "
+            "missing assets (this is what crashed the game with Diablos Black Hole).\n"
+            "Loose Install places new files correctly.\n\n"
+            "Continue with pak injection anyway?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        return answer == QMessageBox.StandardButton.Yes
 
     def _injected_collision_partners(self, mod_name: str) -> list[str]:
         """Injected mods that share pak paths with the given mod."""
@@ -3846,6 +3897,8 @@ class MainWindow(QMainWindow):
         eligible = self._eligible_mods()
         if not eligible:
             self.append_log("No injectable mods (all injected, installed, or blocked)")
+            return
+        if not self._pre_flight():
             return
         self._start_task(
             merge_preview_worker, eligible, self._scan, self._index,
@@ -3925,13 +3978,18 @@ class MainWindow(QMainWindow):
         n_loose = len(self._installed_mods)
         text = (
             f"Revert {n_mods} injected mod(s) ({n_files} baked file(s)) back to "
-            f"the vanilla pak bytes?"
+            f"the vanilla pak content?"
+            "\n\nNote: paks will be content-vanilla but byte-different from the "
+            "shipped files (re-compressed), so the game may still show its "
+            "modification warning. Use Repair for fully pristine paks."
         )
         if n_loose:
             text += (
                 f"\n\n{n_loose} loose mod folder(s) in GAMEDATA\\MODS are not "
                 "touched (remove them individually if wanted)."
             )
+        if not self._pre_flight():
+            return
         answer = QMessageBox.question(
             self, "Restore vanilla", text,
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
