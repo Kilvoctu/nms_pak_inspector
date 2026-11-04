@@ -2,6 +2,9 @@
 
 Simple GUI that can verify, inspect, and install No Man's Sky mods. This app is built mainly for personal use.
 
+<p align="center">
+  <a href="preview.png"><img src="preview.png" width="700" alt="The DSV Manager: User Profile tab"></a>
+</p>
 
 ## Setup/Usage
 1. Have Python 3.10+ and the [.NET 8 Desktop Runtime (x64)](https://dotnet.microsoft.com/en-us/download/dotnet/8.0) (required by MBINCompiler).
