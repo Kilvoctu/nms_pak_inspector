@@ -688,10 +688,11 @@ class _TreeValueDelegate(QStyledItemDelegate):
         elem = item.data(0, Qt.ItemDataRole.UserRole) if item else None
         if elem is None:
             return
-        name = item.text().partition(" = ")[0]
+        name = item.text(0).partition(" = ")[0]
         new_value = editor.text()
-        item.setText(f"{name} = {new_value}")
-        self._on_commit(elem, new_value)
+        item.setText(0, f"{name} = {new_value}")
+        if new_value != (elem.get("value") or ""):
+            self._on_commit(elem, new_value)
 
 
 class _CompareTrees(QWidget):
