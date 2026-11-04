@@ -98,6 +98,7 @@ from .worker import (
     FileHit,
     ModScan,
     TaskWorker,
+    _zip_wrapper_name,
     audit_worker,
     compiler_status_worker,
     compiler_update_worker,
@@ -109,6 +110,7 @@ from .worker import (
     install_mod_worker,
     merge_preview_worker,
     nexus_info_worker,
+    nexus_updates_worker,
     remove_loose_worker,
     revert_all_worker,
     revert_mod_worker,
@@ -1538,17 +1540,7 @@ class _NexusInfoDialog(QDialog):
         elif latest is None:
             row("Status", "no downloadable files listed on Nexus", COLOR_UNMATCHED)
         else:
-            newer = nexus.is_newer_version(parsed["version"], latest.get("version") or "")
-            if result.get("family_match") and parsed["uploaded"]:
-                # Same download family: a re-upload without a version bump still
-                # counts, because we know when OUR file was uploaded. Filename
-                # timestamps are minute-truncated, so ignore sub-minute deltas
-                # (otherwise the same file reads as seconds newer than itself).
-                newer = (
-                    newer
-                    or (latest.get("uploaded_timestamp") or 0) > parsed["uploaded"] + 120
-                )
-            if newer:
+            if nexus.is_update_available(parsed, latest, bool(result.get("family_match"))):
                 row(
                     "Status",
                     f"update available: {parsed['version']} → {latest.get('version')}",
@@ -1627,6 +1619,81 @@ class _NexusKeyDialog(QDialog):
         if self.minimumHeight() != self.maximumHeight():
             self.setFixedSize(self.sizeHint())
         super().showEvent(event)
+
+
+class _NexusUpdatesDialog(QDialog):
+    """Results of the bulk Nexus update check: mods with updates, or an all-clear."""
+
+    def __init__(self, result: dict, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Nexus update check")
+        layout = QVBoxLayout(self)
+
+        updates = result.get("updates") or []
+        errors = result.get("errors") or []
+        skipped = result.get("skipped") or []
+        summary = QLabel(
+            f"{result.get('checked', 0)} mod(s) checked · "
+            f"{len(updates)} update(s) · {len(skipped)} skipped (no Nexus id)"
+            + (f" · {len(errors)} failed" if errors else ""),
+            self,
+        )
+        layout.addWidget(summary)
+
+        if updates:
+            table = QTableWidget(len(updates), 4, self)
+            table.setHorizontalHeaderLabels(
+                ["Mod", "Your version", "Latest on Nexus", "Uploaded"])
+            table.verticalHeader().setVisible(False)
+            table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+            table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+            table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+            table.setWordWrap(False)
+            table.setTextElideMode(Qt.TextElideMode.ElideRight)
+            table.itemDoubleClicked.connect(self._open_page)
+            from datetime import datetime, timezone
+
+            for r, u in enumerate(updates):
+                stamp = datetime.fromtimestamp(
+                    u["uploaded"], tz=timezone.utc
+                ).strftime("%Y-%m-%d") if u.get("uploaded") else "?"
+                name_item = QTableWidgetItem(u["name"])
+                name_item.setData(Qt.ItemDataRole.UserRole, u["mod_id"])
+                table.setItem(r, 0, name_item)
+                table.setItem(r, 1, QTableWidgetItem(str(u["version"])))
+                table.setItem(r, 2, QTableWidgetItem(str(u["latest_version"])))
+                table.setItem(r, 3, QTableWidgetItem(stamp))
+            table.item(0, 0).setSelected(True)
+            table.resizeColumnsToContents()
+            table.setColumnWidth(0, min(table.columnWidth(0), 340))
+            hint = table.verticalHeader().defaultSectionSize() * len(updates) + 46
+            table.setFixedHeight(min(hint, 420))
+            layout.addWidget(table, 1)
+            note = QLabel("Double-click a row to open its Nexus page.", self)
+            note.setForeground(COLOR_DIM)
+            layout.addWidget(note)
+        else:
+            message = QLabel("All Nexus mods are up to date.", self)
+            message.setWordWrap(True)
+            layout.addWidget(message)
+
+        for name, err in errors:
+            row = QLabel(f"{name}: {err}", self)
+            row.setForeground(COLOR_UNMATCHED)
+            row.setWordWrap(True)
+            layout.addWidget(row)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        close = QPushButton("Close")
+        close.clicked.connect(self.accept)
+        buttons.addWidget(close)
+        layout.addLayout(buttons)
+
+    def _open_page(self, item: QTableWidgetItem) -> None:
+        mod_id = item.tableWidget().item(item.row(), 0).data(Qt.ItemDataRole.UserRole)
+        if mod_id:
+            QDesktopServices.openUrl(QUrl(nexus.page_url(mod_id)))
 
 
 class _MergeDialog(QDialog):
@@ -2617,6 +2684,8 @@ class MainWindow(QMainWindow):
         self._compiler_action.triggered.connect(self._on_compiler_action)
         nexus_login = menu.addAction("Nexus API key…")
         nexus_login.triggered.connect(self._on_nexus_key_menu)
+        self._updates_action = menu.addAction("Check Nexus for mod updates")
+        self._updates_action.triggered.connect(self._on_check_updates)
         menu.addSeparator()
         about = menu.addAction("About")
         about.triggered.connect(self._show_about)
@@ -2834,28 +2903,81 @@ class MainWindow(QMainWindow):
 
     def _handle_superseded(self, pending: list) -> bool:
         """Prompt for newer-archive mods; True when an old archive was replaced."""
+        if os.environ.get("QT_QPA_PLATFORM") == "offscreen":
+            return False  # modal dialogs would hang headless test runs
         replaced = False
+        migrated = False
         for mod, old_zips in pending:
             old_names = ", ".join(os.path.basename(z) for z in old_zips)
             self.append_log(
                 f"Update found for {mod.name}: superseding {old_names}",
                 color=COLOR_MERGE,
             )
+            old_candidates = [
+                _zip_wrapper_name(Path(old)) or Path(old).stem for old in old_zips
+            ]
+            injected_old = [n for n in old_candidates if n in self._inject_state]
+            # Lean the prompt by comparing normalized Nexus file names: equal
+            # bases suggest an update, differing bases a same-page variant.
+            new_parsed = nexus.parse_nexus_filename(mod.path)
+            new_base = (
+                nexus.get_base_name(new_parsed["name"]) if new_parsed else ""
+            )
+            old_bases = []
+            for old in old_zips:
+                parsed = nexus.parse_nexus_filename(old)
+                old_bases.append(
+                    nexus.get_base_name(parsed["name"]) if parsed
+                    else nexus.get_base_name(Path(old).stem)
+                )
+            matches = sum(
+                1 for b in old_bases
+                if new_base and (
+                    b == new_base
+                    or (min(len(b), len(new_base)) >= 8
+                        and (b.strip("- ") in new_base
+                             or new_base in b.strip("- ")))
+                )
+            )
+            if new_base and matches == len(old_bases):
+                lean = (
+                    "The file name matches your old download - this looks like "
+                    "an update of the same file."
+                )
+            elif new_base and matches == 0:
+                lean = (
+                    "The file name differs from your old download - this may be "
+                    "a different variant from the same mod page."
+                )
+            else:
+                lean = "Some of the old archives have matching file names."
             box = QMessageBox(self)
             box.setWindowTitle("Mod update")
             box.setText(
-                f"Two archives provide \"{mod.name}\".\n\n"
+                f"Two archives come from Nexus mod page {new_parsed['mod_id']}."
+                if new_parsed
+                else f"Two archives provide \"{mod.name}\"."
+            )
+            box.setInformativeText(
                 f"New: {os.path.basename(mod.path)}\n"
                 f"Old: {old_names}\n\n"
-                "Replace the old archive with the new one?"
+                f"{lean}\n\n"
+                "Replace the old archive with the new one? Your choice is "
+                "remembered (Keep both never asks about this pair again)."
+                + (
+                    "\n\nNOTE: the old version is currently injected - revert that "
+                    "injection first; its backups are keyed to the old archive name."
+                    if injected_old else ""
+                )
             )
             replace_btn = box.addButton(
-                "Replace old archive", QMessageBox.ButtonRole.AcceptRole
+                "Replace (it's an update)", QMessageBox.ButtonRole.AcceptRole
             )
             keep_btn = box.addButton(
-                "Keep both", QMessageBox.ButtonRole.RejectRole
+                "Keep both (different file)", QMessageBox.ButtonRole.RejectRole
             )
             box.addButton("Decide later", QMessageBox.ButtonRole.ActionRole)
+            box.setDefaultButton(keep_btn if matches == 0 and new_base else replace_btn)
             box.exec()
             clicked = box.clickedButton()
             if clicked is replace_btn:
@@ -2869,6 +2991,11 @@ class MainWindow(QMainWindow):
                             f"Could not move {old}: {exc}", color=COLOR_ERROR
                         )
                 replaced = True
+                if install_mods.migrate_loose_name(old_candidates, mod.name):
+                    self.append_log(
+                        f"Loose install follows the update: now {mod.name}"
+                    )
+                    migrated = True
             elif clicked is keep_btn:
                 pair = sorted([os.path.basename(mod.path), *map(os.path.basename, old_zips)])
                 existing = self._settings.value("zip_keep_both")
@@ -2876,6 +3003,17 @@ class MainWindow(QMainWindow):
                 if pair not in pairs:
                     pairs.append(pair)
                     self._settings.setValue("zip_keep_both", json.dumps(pairs))
+        if migrated:
+            # The manifest now points at the new archive: refresh the managed
+            # folder from it (side slot - independent of the pending rescan).
+            self._start_side_task(
+                lambda log: install_mods.rebuild(
+                    self._scan, self._index, self._current_pcbanks(), log
+                ),
+                on_done=lambda r: self.append_log(
+                    f"Loose folder rebuilt: {r['files']} file(s)"
+                ),
+            )
         return replaced
 
     def _start_verify(self) -> None:
@@ -3447,6 +3585,26 @@ class MainWindow(QMainWindow):
             nexus_info_worker, self._nexus_key(), mod.path, mod.name, on_done=done
         )
 
+    def _on_check_updates(self) -> None:
+        """Bulk-check every Nexus-sourced mod for updates (background)."""
+        if self._scan is None:
+            self.append_log("No mods scanned yet")
+            return
+        key = self._nexus_key()
+        if not key:
+            self.append_log(
+                "Set a Nexus API key first (hamburger menu > Nexus API key…)",
+                color=COLOR_MERGE,
+            )
+            return
+        self._start_side_task(
+            nexus_updates_worker, key, self._scan,
+            on_done=self._on_updates_checked,
+        )
+
+    def _on_updates_checked(self, result: dict) -> None:
+        _NexusUpdatesDialog(result, self).exec()
+
     def _toggle_maximized(self) -> None:
         if self.isMaximized():
             self.showNormal()
@@ -3502,9 +3660,10 @@ class MainWindow(QMainWindow):
                         lambda checked=False, k=okey: self._set_file_excluded(k, True)
                     )
             if data and data[0] == "mod":
-                mod_path = next(
-                    (m.path for m in self._scan["mods"] if m.name == data[1]), None
-                )
+                mod = next(
+                    (m for m in self._scan["mods"] if m.name == data[1]), None
+                ) if self._scan else None
+                mod_path = mod.path if mod else None
                 collided = sorted(
                     stored for stored, owners in self._scan["collisions"].items()
                     if data[1] in owners
@@ -3526,6 +3685,35 @@ class MainWindow(QMainWindow):
                             act.triggered.connect(
                                 lambda checked=False, s=stored: self._show_collision(s)
                             )
+                    if self._verifications and mod is not None:
+                        keys = sorted(
+                            (mod.name, hit.entry) for hit in mod.game_files
+                            if (mod.name, hit.entry) in self._verifications
+                        )
+                        if keys:
+                            sub = menu.addMenu("Review / edit fields…")
+                            for k in keys[:40]:
+                                ver = self._verifications[k]
+                                label = k[1]
+                                if ver.status not in (
+                                    verify_mods.FV_VERIFIED, verify_mods.FV_NO_EFFECT
+                                ):
+                                    label += f"  [{_FIELDS_LABEL[ver.status]}]"
+                                act = sub.addAction(label)
+                                if ver.status not in (
+                                    verify_mods.FV_VERIFIED, verify_mods.FV_NO_EFFECT
+                                ):
+                                    font = act.font()
+                                    font.setBold(True)
+                                    act.setFont(font)
+                                act.triggered.connect(
+                                    lambda checked=False, key=k: self._show_fields(
+                                        self._verifications[key]
+                                    )
+                                )
+                            if len(keys) > 40:
+                                more = sub.addAction(f"… {len(keys) - 40} more - expand the mod row")
+                                more.setEnabled(False)
                     action = menu.addAction("Open in Explorer")
                     action.triggered.connect(
                         lambda: _open_in_explorer(mod_path)

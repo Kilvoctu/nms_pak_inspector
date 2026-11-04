@@ -3,7 +3,7 @@
 Simple tool that can verify, inspect, and install No Man's Sky mods. This app is built mainly for personal use.
 
 <p align="center">
-  <a href="preview.png"><img src="preview.png" width="700"></a>
+  <a href="preview.png"><img src="preview.png" width="700" alt="NMS Pak Inspector" title="The UI may look a bit different, but I don't feel like updating this screenshot."></a>
 </p>
 
 ## Setup/Usage
@@ -30,7 +30,7 @@ Simple tool that can verify, inspect, and install No Man's Sky mods. This app is
 ## Notes
 - NMS shows a "tampering" warning on launch when vanilla paks are modified (loads them fine).
 - Mods with outdated/error files can't be injected or installed until the mod is updated for the current game version.
-- This app is provided as-is, do not expect it to be user-friendly or bug-free. It is a personal tool. Use at your own risk.
+- This app is provided as-is, do not expect it to be user-friendly or bug-free, and it *can* brick your game. Use at your own risk.
 
 ## Credits & license
 

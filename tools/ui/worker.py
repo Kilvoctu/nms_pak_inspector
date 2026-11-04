@@ -161,7 +161,9 @@ def _mod_sources(
     def stash(path: Path, display: str, superseded: list[str]) -> None:
         sources.append((path, display, "zip", superseded))
 
-    # Group zips by inner wrapper name (Nexus-style version updates).
+    # Group zips by inner wrapper name (Nexus-style version updates), then
+    # merge groups sharing a Nexus mod id: wrapper names may embed the
+    # version (or get renamed between updates) - the mod id is stable.
     by_inner: dict[str, list[Path]] = {}
     stem_only: list[Path] = []
     for zpath, inner in zip_wrappers.items():
@@ -169,30 +171,64 @@ def _mod_sources(
             by_inner.setdefault(inner, []).append(zpath)
         else:
             stem_only.append(zpath)
-    for inner, zips in sorted(by_inner.items()):
-        if len(zips) == 1:
-            stash(zips[0], inner, [])
-            used.add(inner)
-            continue
+    parent: dict[str, str] = {}
+
+    def _find(x: str) -> str:
+        parent.setdefault(x, x)
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    by_id: dict[int, list[str]] = {}
+    for inner, zips in by_inner.items():
+        for z in zips:
+            parsed = nexus.parse_nexus_filename(z)
+            if parsed:
+                by_id.setdefault(parsed["mod_id"], []).append(inner)
+    for inners in by_id.values():
+        for inner in inners[1:]:
+            root_a, root_b = _find(inners[0]), _find(inner)
+            if root_a != root_b:
+                parent[root_b] = root_a
+    merged: dict[str, list[Path]] = {}
+    for inner, zips in by_inner.items():
+        merged.setdefault(_find(inner), []).extend(zips)
+
+    def _older_display(p: Path) -> str:
+        """Older siblings show their inner wrapper name (falling back to stem)."""
+        d = _zip_wrapper_name(p) or p.stem
+        return p.stem if d in used else d
+
+    for inner, zips in sorted(merged.items()):
         ordered = sorted(zips, key=lambda p: (os.path.getmtime(p), p.name))
         newest = ordered[-1]
         older = ordered[:-1]
+        # The newest zip's wrapper is the group identity: display (and loose
+        # manifest migration) follow the update, not the union-find root.
+        display = _zip_wrapper_name(newest) or inner
+        if len(zips) == 1:
+            stash(zips[0], display, [])
+            used.add(display)
+            continue
         pair = sorted([p.name for p in zips])
         if any(pair == sorted(k) for k in (keep_both or [])):
-            # 'Keep both': the newest keeps the inner identity, older
-            # archives stay as separate mods under their archive names.
-            stash(newest, inner, [])
-            used.add(inner)
+            # 'Keep both': the newest keeps the group identity, older
+            # archives stay as separate mods under their own names.
+            stash(newest, display, [])
+            used.add(display)
             for p in older:
-                stash(p, p.stem, [])
-                used.add(p.stem)
+                d = _older_display(p)
+                stash(p, d, [])
+                used.add(d)
             continue
         older_names = sorted(str(p) for p in older)
-        stash(newest, inner, older_names)
-        used.add(inner)
+        stash(newest, display, older_names)
+        used.add(display)
         for p in older:
-            stash(p, p.stem, [])
-            used.add(p.stem)
+            d = _older_display(p)
+            stash(p, d, [])
+            used.add(d)
     for zpath in stem_only:
         display = zpath.stem
         if display in used:
@@ -480,6 +516,37 @@ def nexus_info_worker(log, api_key: str, source_path: str, display_name: str) ->
     except Exception as exc:  # noqa: BLE001 - shown in the dialog
         result["error"] = friendly_error(exc)
     return result
+
+
+def nexus_updates_worker(log, api_key: str, scan: dict) -> dict:
+    """Check every Nexus-sourced mod for updates (background, cached requests)."""
+    updates, skipped, errors = [], [], []
+    checked = 0
+    mods = scan["mods"] if scan else []
+    for i, mod in enumerate(mods, 1):
+        parsed = nexus.parse_nexus_filename(mod.path)
+        if parsed is None:
+            skipped.append(mod.name)
+            continue
+        try:
+            result = nexus.check_update(parsed, mod.name, api_key)
+        except Exception as exc:  # noqa: BLE001 - collected per mod
+            errors.append((mod.name, friendly_error(exc)))
+            continue
+        checked += 1
+        if result["newer"]:
+            latest = result["latest"]
+            updates.append({
+                "name": mod.name,
+                "mod_id": parsed["mod_id"],
+                "version": parsed["version"],
+                "latest_version": latest.get("version") or "?",
+                "uploaded": latest.get("uploaded_timestamp") or 0,
+            })
+            log(f"update available: {mod.name} {parsed['version']} -> {updates[-1]['latest_version']}")
+        if i % 10 == 0:
+            log(f"checked {i}/{len(mods)} mods…")
+    return {"updates": updates, "checked": checked, "skipped": skipped, "errors": errors}
 
 
 def fields_prep_worker(log, pcbanks: str, pak: str, stored: str, index: dict):

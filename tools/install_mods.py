@@ -110,6 +110,19 @@ def installed_names(pcbanks: str) -> set[str]:
     return set(_load_state())
 
 
+def migrate_loose_name(old_candidates: list[str], new_name: str) -> bool:
+    """Repoint a loose manifest entry at a renamed mod (update/replace flow)."""
+    state = _load_state()
+    for name in old_candidates:
+        if name in state:
+            entry = state.pop(name)
+            state.pop(new_name, None)  # replace any stale entry under the new name
+            state[new_name] = entry
+            _save_state(state)
+            return True
+    return False
+
+
 def remove_all(pcbanks: str, log) -> dict:
     """Wipe the managed folder and forget the manifest."""
     _save_state({})
@@ -179,16 +192,24 @@ def rebuild(scan: dict, index: dict, pcbanks: str, log) -> dict:
     started = time.monotonic()
     state = _load_state()
     mods = {m.name: m for m in scan["mods"]}
+    # Self-heal: prune entries whose source archive is gone (renamed/replaced
+    # outside the app) - a missing source can never contribute content.
+    gone = [name for name in state if name not in mods]
+    for name in gone:
+        del state[name]
+        log(
+            f"WARNING: {name} is loose-installed but its source is gone - "
+            "removed from the loose manifest"
+        )
+    if gone:
+        _save_state(state)
     shutil.rmtree(WORK_ROOT, ignore_errors=True)
     WORK_ROOT.mkdir(parents=True, exist_ok=True)
     compiler = mbincompiler.ensure_compiler()
 
     groups: dict[str, list] = {}
     for name, entry in state.items():
-        mod = mods.get(name)
-        if mod is None:  # mod source gone (deleted zip): skip, keep manifest entry
-            log(f"WARNING: {name} is loose-installed but its source is gone - skipped")
-            continue
+        mod = mods[name]
         for hit in sorted(mod.game_files, key=lambda h: h.entry):
             rel, is_tree = _loose_path(hit)
             key = rel.lower()

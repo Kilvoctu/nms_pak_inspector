@@ -189,6 +189,34 @@ def latest_file_for(files: dict, base_names: set[str]) -> tuple[dict | None, boo
     return max(candidates, key=lambda f: f.get("uploaded_timestamp") or 0), False
 
 
+def is_update_available(parsed: dict, latest: dict | None, family: bool) -> bool:
+    """Version bump or same-family re-upload; stamps within the slack window are
+    the same upload event - a label difference there is not a real update."""
+    if latest is None:
+        return False
+    newer = is_newer_version(parsed["version"], latest.get("version") or "")
+    if family and parsed.get("uploaded"):
+        latest_ts = latest.get("uploaded_timestamp") or 0
+        delta = latest_ts - parsed["uploaded"]
+        if -120 <= delta <= 120:
+            newer = False  # same upload event: label edit at most
+        elif delta > 120:
+            newer = True  # genuine re-upload (version bump optional)
+    return newer
+
+
+def check_update(parsed: dict, display_name: str, api_key: str) -> dict:
+    """Update status for one parsed download: latest file, family match, newer flag."""
+    files = fetch_files(parsed["mod_id"], api_key)
+    base_names = {get_base_name(parsed["name"]), get_base_name(display_name)} - {""}
+    latest, family = latest_file_for(files, base_names)
+    return {
+        "latest": latest,
+        "family_match": family,
+        "newer": is_update_available(parsed, latest, family),
+    }
+
+
 def validate(api_key: str) -> str | None:
     """The account name behind an API key (None when invalid)."""
     try:
