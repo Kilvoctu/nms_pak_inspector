@@ -109,8 +109,7 @@ def load_index(path: str = DEFAULT_OUT) -> dict:
 
 
 def build_hashmap(index: dict) -> dict:
-    """md5(path-as-stored) -> (pak, path). Verify-only assumption: the index
-    was built with 0 hash mismatches."""
+    """md5(path-as-stored) -> (pak, path). Verify-only assumption: the index was built with 0 hash mismatches."""
     hm = {}
     for pak, info in index["paks"].items():
         for p in info["files"]:

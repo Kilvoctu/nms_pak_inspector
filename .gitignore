@@ -1,6 +1,7 @@
 __pycache__/
 .idea/
 .ruff_cache/
+ruff.toml
 venv/
 build/
 dist/

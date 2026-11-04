@@ -68,7 +68,7 @@ def parse_nexus_filename(path: str | Path) -> dict | None:
             "uploaded": uploaded,
         }
 
-    # Old scheme: Name-ModID-Version(-...)-<epoch>
+    # Old scheme: Name-ModID-Version(-...)-<epoch>; the epoch IS the upload time.
     parts = base.split("-")
     if len(parts) < 3:
         return None
@@ -85,7 +85,7 @@ def parse_nexus_filename(path: str | Path) -> dict | None:
         "name": "-".join(parts[:mod_id_index]),
         "mod_id": int(parts[mod_id_index]),
         "version": ".".join(parts[mod_id_index + 1 : -1]).replace("-", "."),
-        "uploaded": None,
+        "uploaded": int(parts[-1]),
     }
 
 
@@ -150,15 +150,43 @@ def fetch_files(mod_id: int, api_key: str) -> dict:
     return _cached("files", mod_id, api_key)
 
 
-def latest_file(files: dict) -> dict | None:
-    """The newest non-archived file entry (OLD_VERSION files excluded)."""
+_BASE_NEXUS_SUFFIX = re.compile(
+    r"\s\d+\s\d+(?:\.\d+)*\s\d{4}-\d{2}-\d{2}t\d{2}-\d{2}z\s[a-z0-9]{6,12}$", re.IGNORECASE
+)
+_BASE_HASH = re.compile(r"\s[a-z0-9]{9}$", re.IGNORECASE)
+_BASE_TAIL_NUM = re.compile(r"-\d+(?:-\d+)*$", re.IGNORECASE)
+_BASE_VERSION = re.compile(r"[- _]?v?\d+(?:\.\d+)*[a-z]?", re.IGNORECASE)
+
+
+def get_base_name(name: str) -> str:
+    """Normalize a mod/file name for family matching (no versions, ids, hashes)."""
+    if not name:
+        return ""
+    clean = name.lower()
+    clean = re.sub(r"\.(zip|rar|7z|pak)$", "", clean)
+    clean = _BASE_NEXUS_SUFFIX.sub("", clean)
+    clean = _BASE_HASH.sub("", clean)
+    clean = _BASE_TAIL_NUM.sub("", clean)
+    clean = _BASE_VERSION.sub("", clean)
+    return re.sub(r"\s+", " ", clean).strip()
+
+
+def latest_file_for(files: dict, base_names: set[str]) -> tuple[dict | None, bool]:
+    """Newest non-archived file in the installed download's family (falls back to page-wide newest)."""
     candidates = [
         f for f in files.get("files", [])
         if f.get("category_name") != "OLD_VERSION"
     ]
     if not candidates:
-        return None
-    return max(candidates, key=lambda f: f.get("uploaded_timestamp") or 0)
+        return None, False
+    family = [
+        f for f in candidates
+        if get_base_name(f.get("name") or "") in base_names
+        or get_base_name(f.get("file_name") or "") in base_names
+    ]
+    if family:
+        return max(family, key=lambda f: f.get("uploaded_timestamp") or 0), True
+    return max(candidates, key=lambda f: f.get("uploaded_timestamp") or 0), False
 
 
 def validate(api_key: str) -> str | None:

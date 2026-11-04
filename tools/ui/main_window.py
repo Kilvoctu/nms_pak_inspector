@@ -1367,9 +1367,15 @@ class _NexusInfoDialog(QDialog):
         latest = result.get("latest")
         error = result.get("error")
 
+        # The Nexus page name follows the page's primary file, which may be a
+        # different download than the one installed - lead with ours.
+        page_name = mod.get("name", "?") if mod else None
+        title_text = parsed["name"] if not page_name else (
+            f'{parsed["name"]}  <span style="font-size:8pt; color:#808080;">'
+            f"(Nexus page: {page_name})</span>"
+        )
         title = QLabel(
-            f'<span style="font-size:13pt; font-weight:bold;">'
-            f"{mod.get('name', parsed['name']) if mod else parsed['name']}</span>",
+            f'<span style="font-size:13pt; font-weight:bold;">{title_text}</span>',
             self,
         )
         title.setWordWrap(True)
@@ -1414,14 +1420,23 @@ class _NexusInfoDialog(QDialog):
             row("Status", f"Nexus request failed - {error}", COLOR_ERROR)
         elif latest is None:
             row("Status", "no downloadable files listed on Nexus", COLOR_UNMATCHED)
-        elif nexus.is_newer_version(parsed["version"], latest.get("version") or ""):
-            row(
-                "Status",
-                f"update available: {parsed['version']} → {latest.get('version')}",
-                COLOR_MERGE,
-            )
         else:
-            row("Status", "up to date", COLOR_CLEAN)
+            newer = nexus.is_newer_version(parsed["version"], latest.get("version") or "")
+            if result.get("family_match") and parsed["uploaded"]:
+                # Same download family: a re-upload without a version bump
+                # still counts, because we know when OUR file was uploaded.
+                newer = (
+                    newer
+                    or (latest.get("uploaded_timestamp") or 0) > parsed["uploaded"]
+                )
+            if newer:
+                row(
+                    "Status",
+                    f"update available: {parsed['version']} → {latest.get('version')}",
+                    COLOR_MERGE,
+                )
+            else:
+                row("Status", "up to date", COLOR_CLEAN)
 
         buttons = QHBoxLayout()
         buttons.addStretch(1)
@@ -1496,8 +1511,7 @@ class _NexusKeyDialog(QDialog):
 
 
 class _MergeDialog(QDialog):
-    """Resolve cross-mod conflicts for a group injection and preview the
-    merged result before anything is written."""
+    """Resolve cross-mod conflicts for a group injection and preview the merged result before writing."""
 
     def __init__(self, preview: dict, injected_names: list[str], parent=None) -> None:
         super().__init__(parent)
@@ -3238,7 +3252,7 @@ class MainWindow(QMainWindow):
             _NexusInfoDialog(mod_name, result, self).exec()
 
         self._start_side_task(
-            nexus_info_worker, self._nexus_key(), mod.path, on_done=done
+            nexus_info_worker, self._nexus_key(), mod.path, mod.name, on_done=done
         )
 
     def _toggle_maximized(self) -> None:

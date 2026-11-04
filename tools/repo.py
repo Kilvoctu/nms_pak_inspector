@@ -7,8 +7,7 @@ from pathlib import Path
 
 
 def project_root() -> Path:
-    """The project folder: the executable's folder when frozen (PyInstaller),
-    else the package parent."""
+    """The project folder: the executable's folder when frozen (PyInstaller), else the package parent."""
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parent.parent

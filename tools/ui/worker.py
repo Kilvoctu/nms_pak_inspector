@@ -134,7 +134,7 @@ def _mod_sources(
 ) -> list[tuple[Path, str, str, list[str]]]:
     """Enumerate mods (zips + folders); returns (root, display_name, kind, superseded_zips).
 
-    Zips are named by their inner folder; same-inner zips are versions of one mod (newest wins; ``keep_both`` exempt)."""
+    Zips are named by their inner folder; same-inner zips are versions of one mod (newest wins, keep_both exempt)."""
     sources: list[tuple[Path, str, str, list[str]]] = []
     if not mods_dir.is_dir():
         return sources
@@ -202,8 +202,7 @@ def _mod_sources(
 
 
 def stash_replaced_zip(zip_path: str, mods_dir: str) -> str:
-    """Move a superseded zip into '<mods>/.replaced/' (kept, hidden from
-    scans). Returns the new location."""
+    """Move a superseded zip into '<mods>/.replaced/' (kept, hidden from scans). Returns the new location."""
     dest_dir = Path(mods_dir) / ".replaced"
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / Path(zip_path).name
@@ -418,7 +417,7 @@ def inject_all_worker(log, names: list, scan: dict, index: dict, pcbanks: str,
     return totals
 
 
-def nexus_info_worker(log, api_key: str, source_path: str) -> dict:
+def nexus_info_worker(log, api_key: str, source_path: str, display_name: str) -> dict:
     """Fetch Nexus metadata for one mod archive; errors reported in the result."""
     parsed = nexus.parse_nexus_filename(source_path)
     if parsed is None:
@@ -429,7 +428,13 @@ def nexus_info_worker(log, api_key: str, source_path: str) -> dict:
     try:
         result["mod"] = nexus.fetch_mod(mod_id, api_key)
         files = nexus.fetch_files(mod_id, api_key)
-        result["latest"] = nexus.latest_file(files)
+        base_names = {
+            nexus.get_base_name(parsed["name"]),
+            nexus.get_base_name(display_name),
+        } - {""}
+        latest, matched = nexus.latest_file_for(files, base_names)
+        result["latest"] = latest
+        result["family_match"] = matched
     except Exception as exc:  # noqa: BLE001 - shown in the dialog
         result["error"] = friendly_error(exc)
     return result

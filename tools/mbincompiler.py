@@ -86,10 +86,7 @@ def _exe_log_version(exe: Path) -> str | None:
 
 
 def local_compilers() -> list[dict]:
-    """Downloaded compilers: [{'tag', 'version', 'exe'}...] newest first.
-
-    Stale exe paths (project folder moved/renamed) self-heal to the managed
-    folder, since the inventory stores absolute paths."""
+    """Downloaded compilers: [{'tag', 'version', 'exe'}...] newest first (stale paths self-heal)."""
     inv = _load_inventory()
     out = []
     for c in inv.get("compilers", []):
