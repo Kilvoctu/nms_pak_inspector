@@ -38,6 +38,7 @@ class FileHit:
     stored: str | None = None  # path as stored in the pak
     match: str | None = None  # human description of the match
     skipped: bool = False  # not a game file (notes, metadata, ...)
+    note: str | None = None  # why this hit is skipped (e.g. "user-excluded")
 
 
 @dataclass
@@ -292,8 +293,15 @@ def scan_mods_worker(
                 h.pak = pak
                 h.stored = f"{base}/{h.rel}".replace("\\", "/").lower()
                 h.match = f"scene-relative to {base}/"
+        # User exclusions: skipped files drop out of verification and injection
+        # (the mod archive itself is never modified).
+        _ignored, excluded = verify_mods.load_overrides()
+        if excluded:
+            for h in scan.hits:
+                if f"{mod_name}|{h.entry}" in excluded:
+                    h.skipped = True
+                    h.note = "user-excluded"
         mods.append(scan)
-
     collisions = {p: names for p, names in owners.items() if len(names) > 1}
     total_files = sum(len(m.game_files) for m in mods)
     log(f"Resolved {len(mods)} mod(s), {total_files} game file(s), "

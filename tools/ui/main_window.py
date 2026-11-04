@@ -3200,7 +3200,9 @@ class MainWindow(QMainWindow):
             item.setToolTip(0, self._mod_tooltip(mod, status, mod_conflicts, mod_shared))
             self._mod_items[mod.name] = item
 
-            for hit in sorted(game_files, key=lambda h: h.entry):
+            for hit in sorted(mod.hits, key=lambda h: (h.skipped, h.entry)):
+                if hit.skipped and hit.note != "user-excluded":
+                    continue  # notes/metadata stay hidden
                 child = QTreeWidgetItem(item)
                 child.setText(0, hit.rel)
                 child.setForeground(0, COLOR_DIM)
@@ -3209,6 +3211,14 @@ class MainWindow(QMainWindow):
                     if self._verifications
                     else None
                 )
+                if hit.skipped and hit.note == "user-excluded":
+                    child.setText(1, "Excluded")
+                    child.setForeground(1, COLOR_DIM)
+                    tip = "Excluded by user: not verified or injected (right-click to include)."
+                    child.setData(0, _SCANTIP_ROLE, tip)
+                    child.setToolTip(0, _wrap_tooltip(tip))
+                    child.setData(0, Qt.ItemDataRole.UserRole, ("file", mod.name, hit.entry))
+                    continue
                 if hit.stored is not None:
                     child_status = self._child_status(hit.stored, mod_conflicts, mod_ambiguous)
                     child.setText(1, _STATUS_LABEL[child_status])
@@ -3440,6 +3450,28 @@ class MainWindow(QMainWindow):
                     action.triggered.connect(
                         lambda: self._show_fields(self._verifications[key])
                     )
+                okey = f"{data[1]}|{data[2]}"
+                ignored, excluded = verify_mods.load_overrides()
+                ver = self._verifications.get((data[1], data[2])) if self._verifications else None
+                if (
+                    ver is not None
+                    and ver.status in (verify_mods.FV_ERROR, verify_mods.FV_OUTDATED)
+                    and okey not in ignored
+                ):
+                    action = menu.addAction("Ignore verification error (inject anyway)")
+                    action.triggered.connect(
+                        lambda checked=False, k=okey, m=ver.message: self._ignore_file_error(k, m)
+                    )
+                if okey in excluded:
+                    action = menu.addAction("Include file in mod (remove exclusion)")
+                    action.triggered.connect(
+                        lambda checked=False, k=okey: self._set_file_excluded(k, False)
+                    )
+                elif hit is not None and not hit.skipped:
+                    action = menu.addAction("Exclude file from mod (stays vanilla)")
+                    action.triggered.connect(
+                        lambda checked=False, k=okey: self._set_file_excluded(k, True)
+                    )
             if data and data[0] == "mod":
                 mod_path = next(
                     (m.path for m in self._scan["mods"] if m.name == data[1]), None
@@ -3478,6 +3510,42 @@ class MainWindow(QMainWindow):
                     if hit.entry == entry:
                         return hit
         return None
+
+    def _ignore_file_error(self, key: str, message: str) -> None:
+        """User-accepted verification failure: verify as OK, inject the file anyway."""
+        if QMessageBox.question(
+            self, "Ignore verification error",
+            "Inject this file even though verification failed?\n\n"
+            f"{message[:400]}"
+            "\n\nNote: for EXML mods this only helps if the vanilla decompile is what "
+            "failed - the merge still needs vanilla data at inject time.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        ignored, excluded = verify_mods.load_overrides()
+        ignored.add(key)
+        verify_mods.save_overrides(ignored, excluded)
+        self._scan_mods()  # re-verifies from cache with the override applied
+
+    def _set_file_excluded(self, key: str, exclude: bool) -> None:
+        """Drop a file out of verification/injection (mod archive stays untouched)."""
+        _mod, entry = key.split("|", 1)
+        text = (
+            f"Exclude {entry} from this mod?\n\nIt will not be verified or injected; "
+            "the vanilla file stays in place. The mod archive is not modified "
+            "(reversible from this menu)."
+            if exclude
+            else f"Include {entry} in this mod again?\n\nIt will be scanned, verified and injected like any other file."
+        )
+        if QMessageBox.question(
+            self, "Exclude file" if exclude else "Include file", text,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        ignored, excluded = verify_mods.load_overrides()
+        (excluded.add if exclude else excluded.discard)(key)
+        verify_mods.save_overrides(ignored, excluded)
+        self._scan_mods()
 
     def _show_collision(self, stored: str) -> None:
         entries: list[tuple[str, str]] = []

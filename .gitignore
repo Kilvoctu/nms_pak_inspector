@@ -14,6 +14,7 @@ mods/
 state.ini
 pak_index.json
 inject_state.json
+verify_overrides.json
 inject_backups/
 .cache/
 mbincompilers/

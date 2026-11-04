@@ -70,8 +70,27 @@ class FileVerification:
 # A cache hit is equivalent to a fresh verify (status, fields, message).
 
 VERIFY_CACHE = repo.cache_dir() / "verify_cache.json"
+OVERRIDES_FILE = repo.project_root() / "verify_overrides.json"
 
 _PAK_FILE_CACHE: dict[str, set[str]] = {}
+
+
+def load_overrides() -> tuple[set[str], set[str]]:
+    """User per-file decisions as 'mod|entry' keys: (ignored errors, excluded files)."""
+    if not OVERRIDES_FILE.exists():
+        return set(), set()
+    try:
+        data = json.loads(OVERRIDES_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set(), set()
+    return set(data.get("ignored", [])), set(data.get("excluded", []))
+
+
+def save_overrides(ignored: set[str], excluded: set[str]) -> None:
+    OVERRIDES_FILE.write_text(
+        json.dumps({"ignored": sorted(ignored), "excluded": sorted(excluded)}, indent=2),
+        encoding="utf-8",
+    )
 
 
 def _pak_file_set(index: dict) -> set[str]:
@@ -665,6 +684,17 @@ def verify_scan(scan: dict, index: dict, log, only_mod: str | None = None) -> di
     else:
         _save_verify_cache({**_load_verify_cache(), **cache})
     shutil.rmtree(work_dir, ignore_errors=True)
+
+    # User overrides, applied after caching so the cache keeps raw verdicts.
+    ignored, _excluded = load_overrides()
+    if ignored:
+        for (mod_name, entry), ver in verifications.items():
+            if f"{mod_name}|{entry}" in ignored and ver.status in (FV_ERROR, FV_OUTDATED):
+                counts[ver.status] -= 1
+                ver.status = FV_VERIFIED
+                ver.message = f"error ignored by user; original: {ver.message}"[:300]
+                counts[ver.status] += 1
+
     log(
         f"Verified {sum(counts.values())} file(s): "
         f"{counts[FV_VERIFIED]} clean, {counts[FV_NO_EFFECT]} no effect, "
