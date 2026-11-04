@@ -32,6 +32,10 @@ from PySide6.QtGui import (
     QBrush,
     QColor,
     QCursor,
+    QDragEnterEvent,
+    QDragLeaveEvent,
+    QDragMoveEvent,
+    QDropEvent,
     QFont,
     QFontDatabase,
     QGuiApplication,
@@ -68,7 +72,6 @@ from PySide6.QtWidgets import (
     QTableWidgetItem,
     QTabWidget,
     QToolButton,
-    QToolTip,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -221,6 +224,10 @@ class _TitleBar(QWidget):
         self.setCursor(Qt.CursorShape.ArrowCursor)
         self.setFixedHeight(34)
         self._busy_count = 0
+        self._pulse_phase = 0.0
+        self._pulse_timer = QTimer(self)
+        self._pulse_timer.setInterval(33)  # ~30 fps pulse
+        self._pulse_timer.timeout.connect(self._on_pulse)
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(8, 0, 4, 0)
@@ -334,14 +341,31 @@ class _TitleBar(QWidget):
     def set_busy(self, busy: bool) -> None:
         self._busy_count += 1 if busy else -1
         self._busy_count = max(0, self._busy_count)
+        if self._busy_count > 0:
+            if not self._pulse_timer.isActive():
+                self._pulse_phase = 0.0
+                self._pulse_timer.start()
+        else:
+            self._pulse_timer.stop()
+        self.update()
+
+    def _on_pulse(self) -> None:
+        """Advance the busy-wash pulse and repaint the title bar."""
+        self._pulse_phase += 0.21  # ~1.4 s per full cycle at 33 ms ticks
         self.update()
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
         painter.fillRect(self.rect(), self.palette().color(QPalette.ColorRole.Window))
         if self._busy_count > 0:
+            # Breathing accent wash: alpha oscillates smoothly between a dim
+            # base and a brighter peak so activity reads at a glance.
+            import math
+
+            wave = 0.5 + 0.5 * math.sin(self._pulse_phase)
+            alpha = int(35 + 50 * wave)
             accent = QColor(
-                COLOR_ACCENT.red(), COLOR_ACCENT.green(), COLOR_ACCENT.blue(), 60
+                COLOR_ACCENT.red(), COLOR_ACCENT.green(), COLOR_ACCENT.blue(), alpha
             )
             painter.fillRect(self.rect(), accent)
         painter.setPen(QPen(self.palette().color(QPalette.ColorRole.Mid), 1.0))
@@ -447,7 +471,6 @@ class _RowActionDelegate(QStyledItemDelegate):
         self._on_action = on_action
         self._mouse_pos: QPoint | None = None
         self._hover_row = -1
-        self._hover_btn: tuple[int, str] | None = None
         self._pressed: tuple[int, str] | None = None
         tree.viewport().installEventFilter(self)
         tree.viewport().setMouseTracking(True)
@@ -501,7 +524,6 @@ class _RowActionDelegate(QStyledItemDelegate):
             if new_hover != self._hover_row or etype == QEvent.Type.MouseMove:
                 self._hover_row = new_hover
                 self._tree.viewport().update()
-            self._update_tooltip(pos, etype)
             if etype == QEvent.Type.MouseButtonPress:
                 self._pressed = self._hit_button(pos)
                 self._tree.viewport().update()
@@ -513,43 +535,17 @@ class _RowActionDelegate(QStyledItemDelegate):
                     if name_item is not None:
                         self._on_action(name_item.text(0), hit[1])
                 self._pressed = None
-                self._hover_btn = None
-                QToolTip.hideText()
                 self._tree.viewport().update()
         elif etype == QEvent.Type.Leave:
             self._mouse_pos = None
             self._hover_row = -1
             self._pressed = None
-            QToolTip.hideText()
             self._tree.viewport().update()
         return False
 
-    def _update_tooltip(self, pos: QPoint, etype) -> None:
-        """Per-button tooltips: which painted button is under the cursor?"""
-        if etype not in (QEvent.Type.MouseMove, QEvent.Type.Enter):
-            return
-        hit = self._hit_button(pos)
-        if hit is None:
-            if self._hover_btn is not None:
-                self._hover_btn = None
-                QToolTip.hideText()
-            return
-        if hit == self._hover_btn:
-            return  # same button; tooltip is already up
-        self._hover_btn = hit
-        index = self._tree.indexAt(pos)
-        name_item = self._tree.itemFromIndex(index.sibling(index.row(), 0))
-        state = name_item.data(0, _ACTION_ROLE) if name_item is not None else None
-        tip = ""
-        if state:
-            tips = state.get("tips") or ("", "")
-            tip = tips[0] if hit[1] == "primary" else tips[1]
-        if tip:
-            QToolTip.showText(
-                self._tree.viewport().mapToGlobal(pos), tip, self._tree.viewport()
-            )
-        else:
-            QToolTip.hideText()
+    # Button tooltips: Qt's native item tooltips show the combined Actions-cell
+    # text set in MainWindow._update_action_states - no manual QToolTip calls
+    # here (they fought the built-in timer and made tooltips flicker away).
 
     # --- painting ------------------------------------------------------------
 
@@ -2176,6 +2172,18 @@ class MainWindow(QMainWindow):
             widget.installEventFilter(self)
             widget.setMouseTracking(True)
 
+        # Drag & drop: archives/folders dropped anywhere on the window are
+        # copied into the mods folder, then a rescan picks them up.
+        self.setAcceptDrops(True)
+        self._drop_overlay = QWidget(self)
+        self._drop_overlay.setStyleSheet(
+            f"background-color: rgba({COLOR_ACCENT.red()}, {COLOR_ACCENT.green()}, "
+            f"{COLOR_ACCENT.blue()}, 36);"
+            f"border: 2px dashed {COLOR_ACCENT.name()};"
+        )
+        self._drop_overlay.hide()
+        self._rescan_pending = False
+
         QTimer.singleShot(0, self._startup)
 
     # --- UI construction ------------------------------------------------------
@@ -2403,6 +2411,7 @@ class MainWindow(QMainWindow):
             self._worker = None
         self._title_bar.set_busy(False)
         self._refresh_actions()
+        self._maybe_rescan_for_drop()
 
     def _on_task_error(self, message: str) -> None:
         self.append_log(f"ERROR: {message}", color=COLOR_ERROR)
@@ -3226,7 +3235,16 @@ class MainWindow(QMainWindow):
         delegate paints from this data)."""
         busy = self._worker is not None
         for name, item in self._mod_items.items():
-            item.setData(0, _ACTION_ROLE, self._action_state(name, busy))
+            state = self._action_state(name, busy)
+            item.setData(0, _ACTION_ROLE, state)
+            # Combined tooltip on the Actions cell: Qt's native item-tooltip
+            # machinery shows this reliably (the delegate no longer paints
+            # per-button QToolTip calls, which flickered).
+            tips = state.get("tips") or ("", "")
+            item.setToolTip(
+                5,
+                f"Pak inject / Revert: {tips[0]}\nInstall / Remove: {tips[1]}",
+            )
         self._tree.viewport().update()
 
     def _action_state(self, name: str, busy: bool) -> dict:
@@ -3643,6 +3661,112 @@ class MainWindow(QMainWindow):
         self._edge_cursor = None
 
     # --- persistence -----------------------------------------------------------
+
+    # --- drag & drop ------------------------------------------------------------
+
+    def _drop_paths(self, mime) -> list[Path]:
+        """Local files/folders from a drag, filtered to mod-shaped entries."""
+        out: list[Path] = []
+        if mime is None or not mime.hasUrls():
+            return out
+        for url in mime.urls():
+            p = Path(url.toLocalFile()) if url.isLocalFile() else None
+            if p is None or not p.exists():
+                continue
+            if (p.is_file() and p.suffix.lower() == ".zip") or p.is_dir():
+                out.append(p)
+        return out
+
+    def _set_drop_active(self, active: bool) -> None:
+        """Amber overlay while a drag hovers anywhere over the window."""
+        if active:
+            self._drop_overlay.setGeometry(self.rect())
+            self._drop_overlay.raise_()
+            self._drop_overlay.show()
+        else:
+            self._drop_overlay.hide()
+
+    def dragEnterEvent(self, event: QDragEnterEvent) -> None:
+        if self._drop_paths(event.mimeData()):
+            event.setDropAction(Qt.DropAction.CopyAction)
+            event.accept()
+            self._set_drop_active(True)
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event: QDragMoveEvent) -> None:
+        if self._drop_paths(event.mimeData()):
+            event.setDropAction(Qt.DropAction.CopyAction)
+            event.accept()
+        else:
+            event.ignore()
+
+    def dragLeaveEvent(self, event: QDragLeaveEvent) -> None:
+        self._set_drop_active(False)
+        event.accept()
+
+    def dropEvent(self, event: QDropEvent) -> None:
+        self._set_drop_active(False)
+        paths = self._drop_paths(event.mimeData())
+        if not paths:
+            event.ignore()
+            return
+        event.acceptProposedAction()
+        self._import_dropped(paths)
+
+    def _import_dropped(self, paths: list[Path]) -> None:
+        """Copy dropped archives/folders into the mods folder, then rescan."""
+        mods_dir = Path(self._mods_edit.text().strip())
+        if not mods_dir.is_dir():
+            self.append_log(
+                f"Cannot copy drops: mods folder does not exist ({mods_dir})",
+                color=COLOR_ERROR,
+            )
+            return
+        copied = 0
+        for src in paths:
+            target = mods_dir / src.name
+            if target.exists():
+                answer = QMessageBox.question(
+                    self,
+                    "Replace mod?",
+                    f"{src.name} already exists in the mods folder.\n"
+                    "Replace it with the dropped version?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                )
+                if answer != QMessageBox.StandardButton.Yes:
+                    self.append_log(f"Skipped {src.name} (kept existing)")
+                    continue
+                if target.is_dir():
+                    shutil.rmtree(target)
+                else:
+                    target.unlink()
+            try:
+                if src.is_dir():
+                    shutil.copytree(src, target)
+                else:
+                    shutil.copyfile(src, target)
+            except OSError as exc:
+                self.append_log(
+                    f"Could not copy {src.name}: {exc}", color=COLOR_ERROR
+                )
+                continue
+            copied += 1
+            self.append_log(f"Copied {src.name} into the mods folder")
+        if not copied:
+            return
+        if self._worker is None:
+            self._scan_mods()
+        else:
+            # A task is running: queue one rescan when it finishes.
+            self._rescan_pending = True
+            self.append_log("Rescan queued until the current task finishes")
+
+    def _maybe_rescan_for_drop(self) -> None:
+        """Consume a queued drop-rescan once the task chain is idle."""
+        if self._rescan_pending and self._worker is None:
+            self._rescan_pending = False
+            self._scan_mods()
 
     def closeEvent(self, event) -> None:
         for worker in list(self._active_workers):

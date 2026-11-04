@@ -112,16 +112,23 @@ def _zip_wrapper_name(zip_path: Path) -> str | None:
     Nexus-style downloads are wrapped in a folder named after the mod (e.g.
     ``Diablos_Galaxy_Map/…``) - that inner name is a better display name than
     the download filename. Returns None when entries sit at the zip root, in
-    several folders, or under a game-content dir (GLOBALS, MODELS, ...)."""
+    several folders, or under a game-content dir (GLOBALS, MODELS, ...).
+
+    Loose non-game files at the zip root (AMUMSS .lua scripts, readme .txt
+    files, ...) are ignored - the scanner skips them anyway."""
     tops: set[str] = set()
     try:
         with ZipFile(zip_path) as z:
             for n in z.namelist():
                 if n.endswith("/"):
                     continue
-                top = n.split("/", 1)[0]
+                n = n.replace("\\", "/")
                 if "/" not in n:
-                    return None  # loose file at the zip root: no wrapper
+                    base = n.rsplit("/", 1)[-1]
+                    if os.path.splitext(base)[1].lower() not in locate_mod.SKIP_EXT:
+                        return None  # loose GAME file at the zip root
+                    continue  # loose non-game file: irrelevant
+                top = n.split("/", 1)[0]
                 tops.add(top)
                 if len(tops) > 1:
                     return None

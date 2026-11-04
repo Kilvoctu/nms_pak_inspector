@@ -22,7 +22,7 @@ class _TooltipDelayStyle(QProxyStyle):
 
 
 def _lock_dir() -> Path:
-    directory = Path(__file__).resolve().parent
+    directory = repo.project_root()
     try:
         directory.mkdir(parents=True, exist_ok=True)
     except OSError:

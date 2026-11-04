@@ -66,6 +66,7 @@ def game_version() -> tuple[int, ...] | None:
             capture_output=True,
             text=True,
             timeout=60,
+            creationflags=repo._SUBPROCESS_FLAGS,
         )
         version = result.stdout.strip()
         if version:
@@ -240,7 +241,11 @@ def decompile(mbin_path: str | Path, *, compiler: dict | None = None) -> Path:
         return mxml
     exe = Path((compiler or ensure_compiler())["exe"])
     result = subprocess.run(
-        [str(exe), str(mbin)], capture_output=True, text=True, timeout=60
+        [str(exe), str(mbin)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        creationflags=repo._SUBPROCESS_FLAGS,
     )
     if not mxml.exists():
         detail = (result.stdout or "") + (result.stderr or "")
@@ -256,7 +261,11 @@ def compile_mxml(mxml_path: str | Path, *, compiler: dict | None = None) -> Path
         mbin.unlink()
     exe = Path((compiler or ensure_compiler())["exe"])
     result = subprocess.run(
-        [str(exe), str(mxml)], capture_output=True, text=True, timeout=60
+        [str(exe), str(mxml)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        creationflags=repo._SUBPROCESS_FLAGS,
     )
     if not mbin.exists():
         detail = (result.stdout or "") + (result.stderr or "")

@@ -5,11 +5,16 @@ the project folder and never scans arbitrary user paths.
 """
 
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 
 def project_root() -> Path:
-    """The nms_pack_injector project folder (parent of this package)."""
+    """The project folder: the executable's folder when frozen (PyInstaller),
+    else the package parent."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parent.parent
 
 
@@ -58,13 +63,16 @@ def inject_backup_dir() -> Path:
 
 GAME_PACKAGE = "HelloGames.NoMansSky"
 
+# Suppress the console window a child process (powershell, MBINCompiler)
+# would pop up when the GUI runs as a windowed exe (no parent console to
+# inherit); 0 is a no-op where the constant doesn't exist (non-Windows).
+_SUBPROCESS_FLAGS = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
 
 def appx_install_location() -> str | None:
     """MS Store install location of the game (works even without a junction).
 
     Returns the *real* WindowsApps path; slow (PowerShell) - callers cache."""
-    import subprocess
-
     try:
         result = subprocess.run(
             [
@@ -74,6 +82,7 @@ def appx_install_location() -> str | None:
             capture_output=True,
             text=True,
             timeout=60,
+            creationflags=_SUBPROCESS_FLAGS,
         )
         location = result.stdout.strip()
         return location or None
