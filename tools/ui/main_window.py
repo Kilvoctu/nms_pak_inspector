@@ -681,7 +681,16 @@ class _MergedPreview(QTreeWidget):
         self.setHeaderHidden(True)
 
     def set_data(self, mod_root, van_root) -> None:
-        merged, _notes = merge_mods.merge_tree(mod_root, van_root)
+        """Merged view; on a strict-merge failure, explain and defer to compare view."""
+        try:
+            merged, _notes = merge_mods.merge_tree(mod_root, van_root)
+        except merge_mods.MergeError as exc:
+            self.set_raw_note(
+                f"Merged preview unavailable: {exc}\n"
+                "This file is injected byte-exact as shipped - use the side-by-side "
+                "compare to see the real difference."
+            )
+            return
         self.set_merged(merged, van_root)
 
     def set_merged(self, merged_root, van_root, changed_only: bool = False) -> None:
@@ -1531,11 +1540,13 @@ class _NexusInfoDialog(QDialog):
         else:
             newer = nexus.is_newer_version(parsed["version"], latest.get("version") or "")
             if result.get("family_match") and parsed["uploaded"]:
-                # Same download family: a re-upload without a version bump
-                # still counts, because we know when OUR file was uploaded.
+                # Same download family: a re-upload without a version bump still
+                # counts, because we know when OUR file was uploaded. Filename
+                # timestamps are minute-truncated, so ignore sub-minute deltas
+                # (otherwise the same file reads as seconds newer than itself).
                 newer = (
                     newer
-                    or (latest.get("uploaded_timestamp") or 0) > parsed["uploaded"]
+                    or (latest.get("uploaded_timestamp") or 0) > parsed["uploaded"] + 120
                 )
             if newer:
                 row(
@@ -2226,10 +2237,13 @@ class _FieldDialog(QDialog):
     # --- merged preview ------------------------------------------------------------
 
     def _on_tab_changed(self, _index: int) -> None:
-        if self._tabs.currentWidget() is self._preview_tree:
-            self._preview_tree.set_data(self._mod_root, self._van_root)
-        elif self._tabs.currentWidget() is self._compare:
-            self._compare.rebuild()
+        try:
+            if self._tabs.currentWidget() is self._preview_tree:
+                self._preview_tree.set_data(self._mod_root, self._van_root)
+            elif self._tabs.currentWidget() is self._compare:
+                self._compare.rebuild()
+        except Exception as exc:  # noqa: BLE001  themed popup instead of a traceback
+            self._show_error_popup(f"Editor view failed: {exc}")
 
     def _on_compare_edited(self) -> None:
         """The compare tree mutated the in-memory mod tree: refresh tables."""
@@ -3544,9 +3558,7 @@ class MainWindow(QMainWindow):
         """Drop a file out of verification/injection (mod archive stays untouched)."""
         _mod, entry = key.split("|", 1)
         text = (
-            f"Exclude {entry} from this mod?\n\nIt will not be verified or injected; "
-            "the vanilla file stays in place. The mod archive is not modified "
-            "(reversible from this menu)."
+            f"Exclude {entry} from this mod?\n\nIt will not be verified or injected; The mod archive is not modified."
             if exclude
             else f"Include {entry} in this mod again?\n\nIt will be scanned, verified and injected like any other file."
         )
@@ -3682,7 +3694,7 @@ class MainWindow(QMainWindow):
             tips = state.get("tips") or ("", "")
             item.setToolTip(
                 5,
-                f"Pak inject / Revert: {tips[0]}\nInstall / Remove: {tips[1]}",
+                f"Install / Remove: {tips[0]}\nPak inject / Revert: {tips[1]}",
             )
         self._tree.viewport().update()
 
@@ -3699,17 +3711,16 @@ class MainWindow(QMainWindow):
         injected = name in self._inject_state
         installed = self._is_installed(name)
         allowed = self._inject_allowed(name)
-        if injected:
-            primary = ("Revert", not busy)
-            primary_tip = (
-                "Restores this mod's pre-injection bytes from the managed backups"
-            )
+        # Left button = Install/Remove (loose), right button = Pak inject/Revert.
+        if installed:
+            primary = ("Remove", not busy)
+            primary_tip = "Deletes this mod's folder from GAMEDATA\\MODS"
         else:
-            primary = ("Pak inject", not busy and allowed and not installed)
-            if installed:
+            primary = ("Install", not busy and allowed and not injected)
+            if injected:
                 primary_tip = (
-                    "Blocked: this mod is installed in GAMEDATA\\MODS - "
-                    "remove that install first to avoid double-applying"
+                    "Blocked: this mod is injected into the paks - "
+                    "revert that first to avoid double-applying"
                 )
             elif busy:
                 primary_tip = "Blocked while another task is running"
@@ -3717,18 +3728,20 @@ class MainWindow(QMainWindow):
                 primary_tip = "Blocked: verification has outdated/error files"
             else:
                 primary_tip = (
-                    "Bakes this mod's files into the vanilla paks "
-                    "(requires verification without blocking issues)"
+                    "Copies this mod's files into GAMEDATA\\MODS "
+                    "(the game's loose-mod loader)"
                 )
-        if installed:
-            secondary = ("Remove", not busy)
-            secondary_tip = "Deletes this mod's folder from GAMEDATA\\MODS"
+        if injected:
+            secondary = ("Revert", not busy)
+            secondary_tip = (
+                "Restores this mod's pre-injection bytes from the managed backups"
+            )
         else:
-            secondary = ("Install", not busy and allowed and not injected)
-            if injected:
+            secondary = ("Pak inject", not busy and allowed and not installed)
+            if installed:
                 secondary_tip = (
-                    "Blocked: this mod is injected into the paks - "
-                    "revert that first to avoid double-applying"
+                    "Blocked: this mod is installed in GAMEDATA\\MODS - "
+                    "remove that install first to avoid double-applying"
                 )
             elif busy:
                 secondary_tip = "Blocked while another task is running"
@@ -3736,8 +3749,8 @@ class MainWindow(QMainWindow):
                 secondary_tip = "Blocked: verification has outdated/error files"
             else:
                 secondary_tip = (
-                    "Copies this mod's files into GAMEDATA\\MODS "
-                    "(the game's loose-mod loader)"
+                    "Bakes this mod's files into the vanilla paks "
+                    "(requires verification without blocking issues)"
                 )
         return {
             "primary": primary,
@@ -3763,11 +3776,11 @@ class MainWindow(QMainWindow):
     # --- inject / revert --------------------------------------------------------
 
     def _on_row_action(self, mod_name: str, which: str) -> None:
-        """Delegate-painted Actions column clicked."""
+        """Delegate-painted Actions column clicked (left = install, right = inject)."""
         if which == "primary":
-            self._on_inject_button(mod_name)
-        else:
             self._on_install_button(mod_name)
+        else:
+            self._on_inject_button(mod_name)
 
     def _nms_running(self) -> bool:
         """True if No Man's Sky is running (pak swaps fail while it holds the files)."""

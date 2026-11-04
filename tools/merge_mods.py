@@ -112,7 +112,9 @@ def _apply_pair(mp: ET.Element, vp: ET.Element, path: str = "?",
         # children land as no-ops; a real child edit raises "not present".
         _apply_children(mod_children, van_children, vp, edits, path + "/")
     elif van_children:
-        raise MergeError("vanilla nests children here, mod is a flat leaf")
+        raise MergeError(
+            f"vanilla nests children at {path!r}, but the mod has a flat leaf there"
+        )
     else:
         mod_value = mp.get("value")
         van_value = vp.get("value")
