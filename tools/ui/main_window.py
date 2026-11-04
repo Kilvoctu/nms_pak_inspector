@@ -2698,8 +2698,6 @@ class MainWindow(QMainWindow):
 
     def _on_task_error(self, message: str) -> None:
         self.append_log(f"ERROR: {message}", color=COLOR_ERROR)
-        if not self._log_view.isVisible():
-            self._log_view.setVisible(True)  # an error must never be invisible
         if self._injecting_mod is not None or self._installing_mod is not None:
             # A failed action must not leave its button stuck mid-state.
             self._injecting_mod = None
@@ -2708,6 +2706,20 @@ class MainWindow(QMainWindow):
         if self._scan is not None:
             self._inject_state = inject_mods.load_state()
             self._fill_tree()
+        self._show_error_popup(message)
+
+    def _show_error_popup(self, message: str) -> None:
+        """Errors surface as a themed dialog (console stays off if the user keeps it off)."""
+        if os.environ.get("QT_QPA_PLATFORM") == "offscreen":
+            return  # modal dialogs would hang headless test runs
+        headline = message.splitlines()[0].strip() or "Task failed"
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Critical)
+        box.setWindowTitle("Task failed")
+        box.setText(headline)
+        if len(message.splitlines()) > 1 or len(message) > 240:
+            box.setDetailedText(message)
+        box.exec()
 
     def _migrate_game_folder(self) -> str | None:
         """Best-effort game folder: saved setting, then old PCBANKS setting,
