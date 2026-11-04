@@ -2753,7 +2753,15 @@ class MainWindow(QMainWindow):
         self._verifications.update(result["verifications"])
         self._verify_counts = self._recompute_verify_counts()
         self._conflicts = compute_field_conflicts(self._scan, self._verifications)
-        self._update_mod_rows(mod_name)
+        # Conflict status is shared: any mod on a collided pak path with the
+        # edited mod may flip (e.g. Conflict -> Merge needed), so refresh all.
+        names = {mod_name}
+        mod = next((m for m in self._scan["mods"] if m.name == mod_name), None)
+        if mod is not None:
+            for h in mod.game_files:
+                names.update(self._scan["collisions"].get(h.stored or "", []))
+        for name in sorted(names):
+            self._update_mod_rows(name)
         self._update_mods_status()
         self._refresh_actions()
 
@@ -2775,19 +2783,15 @@ class MainWindow(QMainWindow):
             for h in mod.game_files
             if (mod.name, h.entry) in self._verifications
         ]
+        # Header status can shift too (e.g. a resolved field conflict).
+        status, mod_conflicts, mod_ambiguous, mod_shared = self._mod_status(mod)
+        item.setText(1, _STATUS_LABEL[status])
+        item.setForeground(1, _status_color(status))
+        item.setToolTip(0, self._mod_tooltip(mod, status, mod_conflicts, mod_shared))
         if ver_statuses:
             worst = min(ver_statuses, key=lambda s: worst_rank[s])
             item.setText(2, _FIELDS_LABEL[worst])
             item.setForeground(2, _FIELDS_COLOR[worst])
-        conflict_map = {
-            c.stored: c for c in (self._conflicts or [])
-            if c.kind == K_CONFLICT and mod.name in c.edits
-        }
-        ambiguous_map = {
-            c.stored: c for c in (self._conflicts or [])
-            if c.kind == K_AMBIGUOUS and mod.name in c.edits
-        }
-        collisions: dict[str, list[str]] = self._scan["collisions"]
         for i in range(item.childCount()):
             child = item.child(i)
             data = child.data(0, Qt.ItemDataRole.UserRole)
@@ -2800,12 +2804,7 @@ class MainWindow(QMainWindow):
                 continue
             # Resolution status can shift if conflicts changed with the edit.
             if hit.stored is not None:
-                if hit.stored in conflict_map:
-                    child_status = ST_CONFLICT
-                elif hit.stored in ambiguous_map or hit.stored in collisions:
-                    child_status = ST_MERGE
-                else:
-                    child_status = ST_CLEAN
+                child_status = self._child_status(hit.stored, mod_conflicts, mod_ambiguous)
                 child.setText(1, _STATUS_LABEL[child_status])
                 child.setForeground(1, _status_color(child_status))
             ver = self._verifications.get((mod.name, hit.entry))
@@ -2955,6 +2954,54 @@ class MainWindow(QMainWindow):
 
     # --- tree filling ---------------------------------------------------------
 
+    def _mod_status(self, mod) -> tuple[str, dict, dict, set]:
+        """(status, conflict maps, shared stored paths) - participant-aware (see _fill_tree)."""
+        # Only conflicts this mod participates in (name among editors) mark it conflicted.
+        mod_conflicts = {
+            c.stored: c for c in (self._conflicts or [])
+            if c.kind == K_CONFLICT and mod.name in c.edits
+        }
+        mod_ambiguous = {
+            c.stored: c for c in (self._conflicts or [])
+            if c.kind == K_AMBIGUOUS and mod.name in c.edits
+        }
+        mod_shared = {
+            h.stored for h in mod.game_files if h.stored in self._scan["collisions"]
+        }
+        if mod_conflicts:
+            status = ST_CONFLICT
+        elif mod_shared or any(h.stored in mod_ambiguous for h in mod.game_files):
+            status = ST_MERGE
+        elif mod.has_unmatched:
+            status = ST_UNMATCHED
+        else:
+            status = ST_CLEAN
+        return status, mod_conflicts, mod_ambiguous, mod_shared
+
+    def _child_status(self, stored: str, mod_conflicts: dict, mod_ambiguous: dict) -> str:
+        """File-row status: true conflict, else merge (ambiguous or shared pak path)."""
+        if stored in mod_conflicts:
+            return ST_CONFLICT
+        if stored in mod_ambiguous or stored in self._scan["collisions"]:
+            return ST_MERGE
+        return ST_CLEAN
+
+    def _mod_tooltip(self, mod, status: str, mod_conflicts: dict, mod_shared: set) -> str:
+        """Header tooltip for one mod row, with status-dependent detail lines."""
+        detail = {
+            ST_CLEAN: "All files resolve to exactly one pak location.",
+            ST_MERGE: "Shares pak path(s) with other mods - merge before injection: "
+            + ", ".join(sorted(mod_shared)),
+            ST_CONFLICT: "True field conflict(s) with other mods: "
+            + ", ".join(
+                f"{c.path} ({c.stored})" for c in mod_conflicts.values()
+            ),
+            ST_UNMATCHED: "Some file(s) matched no pak entry - they would be added as new files.",
+        }[status]
+        return _wrap_tooltip(
+            f"{len(mod.game_files)} game file(s) in {len(mod.paks)} pak(s).\n{detail}"
+        )
+
     def _fill_tree(self) -> None:
         if self._scan is None:
             return
@@ -2976,28 +3023,7 @@ class MainWindow(QMainWindow):
 
         for mod in mods:
             game_files = mod.game_files
-            # Only conflicts THIS mod participates in (its name among the
-            # editors) mark it conflicted; merely shipping the same file as
-            # two fighting mods stays a plain merge.
-            mod_conflicts = {
-                c.stored: c for c in (self._conflicts or [])
-                if c.kind == K_CONFLICT and mod.name in c.edits
-            }
-            mod_ambiguous = {
-                c.stored: c for c in (self._conflicts or [])
-                if c.kind == K_AMBIGUOUS and mod.name in c.edits
-            }
-            mod_shared = {h.stored for h in game_files if h.stored in collisions}
-            if mod_conflicts:
-                status = ST_CONFLICT
-            elif mod_shared or (
-                any(h.stored in mod_ambiguous for h in game_files)
-            ):
-                status = ST_MERGE
-            elif mod.has_unmatched:
-                status = ST_UNMATCHED
-            else:
-                status = ST_CLEAN
+            status, mod_conflicts, mod_ambiguous, mod_shared = self._mod_status(mod)
 
             # Fields verdict: worst verification status among this mod's files.
             worst_rank = {s: i for i, s in enumerate(_FIELDS_WORST_FIRST)}
@@ -3023,23 +3049,7 @@ class MainWindow(QMainWindow):
             item.setForeground(3, COLOR_DIM)
             item.setText(4, str(len(game_files)))
             item.setData(0, Qt.ItemDataRole.UserRole, ("mod", mod.name))
-            item.setToolTip(
-                0,
-                _wrap_tooltip(
-                    f"{len(game_files)} game file(s) in {len(mod.paks)} pak(s).\n"
-                    + {
-                        ST_CLEAN: "All files resolve to exactly one pak location.",
-                        ST_MERGE: "Shares pak path(s) with other mods - merge before injection: "
-                        + ", ".join(sorted(mod_shared)),
-                        ST_CONFLICT: "True field conflict(s) with other mods: "
-                        + ", ".join(
-                            f"{c.path} ({c.stored})" for c in (self._conflicts or [])
-                            if c.kind == K_CONFLICT and c.stored in mod_conflicts
-                        ),
-                        ST_UNMATCHED: "Some file(s) matched no pak entry - they would be added as new files.",
-                    }[status]
-                ),
-            )
+            item.setToolTip(0, self._mod_tooltip(mod, status, mod_conflicts, mod_shared))
             self._mod_items[mod.name] = item
 
             for hit in sorted(game_files, key=lambda h: h.entry):
@@ -3052,12 +3062,7 @@ class MainWindow(QMainWindow):
                     else None
                 )
                 if hit.stored is not None:
-                    if hit.stored in mod_conflicts:
-                        child_status = ST_CONFLICT
-                    elif hit.stored in mod_ambiguous or hit.stored in collisions:
-                        child_status = ST_MERGE
-                    else:
-                        child_status = ST_CLEAN
+                    child_status = self._child_status(hit.stored, mod_conflicts, mod_ambiguous)
                     child.setText(1, _STATUS_LABEL[child_status])
                     child.setForeground(1, _status_color(child_status))
                     child.setText(3, hit.stored)
