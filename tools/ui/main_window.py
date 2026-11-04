@@ -697,9 +697,6 @@ class _MergedPreview(QTreeWidget):
 
     def _fill(self, merged_props, van_props, parent_item, changed_only=False) -> bool:
         """Build items; returns whether anything was kept (changed_only prunes the rest)."""
-        van_by_name: dict[str | None, list] = {}
-        for vp in van_props:
-            van_by_name.setdefault(vp.get("name"), []).append(vp)
         van_by_id: dict[tuple[str | None, str], object] = {}
         van_by_index: dict[tuple[str | None, str], object] = {}
         for vp in van_props:
@@ -708,13 +705,7 @@ class _MergedPreview(QTreeWidget):
                 van_by_id[(vp.get("name"), vid)] = vp
             if vidx is not None:
                 van_by_index[(vp.get("name"), vidx)] = vp
-        consumed: dict[str | None, int] = {}
-
-        def pick(name):
-            cands = van_by_name.get(name, [])
-            i = consumed.get(name, 0)
-            consumed[name] = i + 1
-            return cands[i] if i < len(cands) else None
+        picker = merge_mods.VanillaPicker(van_props)
 
         kept = False
         for mp in merged_props:
@@ -723,13 +714,16 @@ class _MergedPreview(QTreeWidget):
             inserted = False
             if mid is not None:
                 vp = van_by_id.get((name, mid))
+                if vp is not None:
+                    picker.mark(vp)
             elif mindex is not None and van_by_index.get((name, mindex)) is not None:
                 vp = van_by_index[(name, mindex)]
+                picker.mark(vp)
             elif mindex is not None:
                 vp = None
                 inserted = True
             else:
-                vp = pick(name)
+                vp = picker.pick(name, mp)
             label = name or "?"
             children = list(mp.findall("Property"))
             if children:
@@ -890,7 +884,7 @@ class _CompareTrees(QWidget):
             self._pairs.clear()
             self._pairs_r.clear()
             self._pair_vpid.clear()
-            self._dups = verify_mods._duplicate_groups(self._mod_root)
+            self._dups = verify_mods._duplicate_groups(self._mod_root, self._van_root)
             van_props = list(self._van_root.findall("Property"))
             left_items, right_items = self._fill_mod(
                 list(self._mod_root.findall("Property")), van_props,
@@ -913,9 +907,6 @@ class _CompareTrees(QWidget):
     def _fill_mod(self, mod_props, van_props, needle: str,
                   changed_only: bool) -> tuple[list, list]:
         """Build the left (mod) tree items; filtered mode also returns vanilla mirrors."""
-        van_by_name: dict[str | None, list] = {}
-        for vp in van_props:
-            van_by_name.setdefault(vp.get("name"), []).append(vp)
         van_by_id: dict[tuple[str | None, str], object] = {}
         van_by_index: dict[tuple[str | None, str], object] = {}
         for vp in van_props:
@@ -924,13 +915,7 @@ class _CompareTrees(QWidget):
                 van_by_id[(vp.get("name"), vid)] = vp
             if vidx is not None:
                 van_by_index[(vp.get("name"), vidx)] = vp
-        consumed: dict[str | None, int] = {}
-
-        def pick(name):
-            cands = van_by_name.get(name, [])
-            i = consumed.get(name, 0)
-            consumed[name] = i + 1
-            return cands[i] if i < len(cands) else None
+        picker = merge_mods.VanillaPicker(van_props)
 
         left_out: list[QTreeWidgetItem] = []
         right_out: list[QTreeWidgetItem] = []
@@ -940,12 +925,15 @@ class _CompareTrees(QWidget):
             mremove = mp.get("_remove") is not None
             if mid is not None:
                 vp = van_by_id.get((name, mid))
+                if vp is not None:
+                    picker.mark(vp)
             elif mindex is not None and van_by_index.get((name, mindex)) is not None:
                 vp = van_by_index[(name, mindex)]
+                picker.mark(vp)
             elif mindex is not None:
                 vp = None
             else:
-                vp = pick(name)
+                vp = picker.pick(name, mp)
             children = list(mp.findall("Property"))
             van_children = list(vp.findall("Property")) if vp is not None else []
             value = mp.get("value")
@@ -2015,7 +2003,7 @@ class _FieldDialog(QDialog):
         self._changed_rows = [r for r in rows if r.verdict != verify_mods.V_SAME]
 
     def _fill_table(self, table: QTableWidget, rows: list) -> None:
-        self._dups = verify_mods._duplicate_groups(self._mod_root)
+        self._dups = verify_mods._duplicate_groups(self._mod_root, self._van_root)
         self._table_rows[id(table)] = rows
         table.blockSignals(True)
         table.setRowCount(len(rows))

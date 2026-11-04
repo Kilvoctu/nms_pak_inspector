@@ -1,12 +1,26 @@
 """Apply a mod's file deltas onto the vanilla tree (pairing rules mirror verify_mods._diff_children)."""
 
 import copy
+import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 
 from . import mbincompiler
-from .verify_mods import _value_class
+
+_INT_RE = re.compile(r"^[+-]?\d+$")
+
+
+def _value_class(value: str | None) -> str:
+    if value is None:
+        return "none"
+    if _INT_RE.match(value):
+        return "int"
+    try:
+        float(value)
+        return "float"
+    except ValueError:
+        return "text"
 
 
 class MergeError(Exception):
@@ -46,26 +60,15 @@ def merge_tree(mod_root: ET.Element, van_root: ET.Element) -> tuple[ET.Element, 
 def _apply_children(mod_props, van_props, parent: ET.Element,
                     edits: list | None = None, path: str = "") -> None:
     """Apply the mod's edits onto ``parent``'s vanilla children; with ``edits``, record changes."""
-    van_by_name: dict[str | None, list] = {}
     van_by_id: dict[tuple[str | None, str], ET.Element] = {}
     van_by_index: dict[tuple[str | None, str], ET.Element] = {}
     for vp in van_props:
-        n = vp.get("name")
-        van_by_name.setdefault(n, []).append(vp)
-        vid = vp.get("_id")
+        vid, vidx = vp.get("_id"), vp.get("_index")
         if vid is not None:
-            van_by_id[(n, vid)] = vp
-        vidx = vp.get("_index")
+            van_by_id[(vp.get("name"), vid)] = vp
         if vidx is not None:
-            van_by_index[(n, vidx)] = vp
-    used: set[int] = set()
-    consumed: dict[str | None, int] = {}
-
-    def pick_positional(name):
-        cands = [c for c in van_by_name.get(name, []) if id(c) not in used]
-        idx = consumed.get(name, 0)
-        consumed[name] = idx + 1
-        return cands[idx] if idx < len(cands) else None
+            van_by_index[(vp.get("name"), vidx)] = vp
+    picker = VanillaPicker(van_props)
 
     for mp in mod_props:
         name = mp.get("name")
@@ -77,26 +80,22 @@ def _apply_children(mod_props, van_props, parent: ET.Element,
             vp = van_by_id.get((name, mid))
             if vp is None:
                 raise MergeError(f"entry keyed _id={mid!r} not found in vanilla")
+            picker.mark(vp)
         elif mindex is not None and van_by_index.get((name, mindex)) is not None:
             vp = van_by_index[(name, mindex)]
+            picker.mark(vp)
         elif mindex is not None:
             if mremove:
                 continue  # removal at a position vanilla doesn't have: no-op
             _insert_entry(parent, mp, name, mindex)
             continue
-        elif name is None:
-            unnamed = [c for c in van_props if c.get("name") is None and id(c) not in used]
-            if not unnamed:
-                raise MergeError("unnamed property has no vanilla counterpart")
-            vp = unnamed[0]
         else:
-            vp = pick_positional(name)
+            vp = picker.pick(name, mp)
             if vp is None:
                 if mremove:
                     continue  # vanilla list has no such entry: no-op
                 raise MergeError(f"field {name!r} not present in the current game build")
 
-        used.add(id(vp))
         if mremove:
             parent.remove(vp)
             continue
@@ -182,6 +181,46 @@ def merge_many(mod_roots: list, van_root: ET.Element,
     if merged_mxml_bytes(merged) == merged_mxml_bytes(van_root):
         notes.append("no effective changes - merged tree equals vanilla")
     return merged, notes, conflicts
+
+
+def pair_identity(elem) -> str | None:
+    """Struct-list item identity: the single payload child's name (None = pair positionally)."""
+    kids = [c for c in elem if c.tag == "Property"]
+    if len(kids) == 1:
+        return kids[0].get("name")
+    return None
+
+
+class VanillaPicker:
+    """Vanilla pairing for mod children: repeated struct-list items prefer an identity
+    match (single payload child name); shared by verifier, merger and compare trees."""
+
+    def __init__(self, van_props) -> None:
+        self._by_name: dict[str | None, list] = {}
+        for vp in van_props:
+            self._by_name.setdefault(vp.get("name"), []).append(vp)
+        self._used: set[int] = set()
+
+    def pick(self, name, mod_elem=None):
+        """The vanilla counterpart for a mod child, or None when none remain."""
+        free = [c for c in self._by_name.get(name, []) if id(c) not in self._used]
+        if not free:
+            return None
+        chosen = None
+        ident = pair_identity(mod_elem) if mod_elem is not None else None
+        if ident is not None and len(self._by_name.get(name, [])) > 1:
+            for cand in free:
+                if pair_identity(cand) == ident:
+                    chosen = cand
+                    break
+        if chosen is None:
+            chosen = free[0]
+        self._used.add(id(chosen))
+        return chosen
+
+    def mark(self, vp) -> None:
+        """Consume a vanilla element chosen directly (via _id/_index directives)."""
+        self._used.add(id(vp))
 
 
 def _insert_entry(parent: ET.Element, entry: ET.Element, name: str | None,

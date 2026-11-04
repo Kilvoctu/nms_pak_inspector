@@ -11,7 +11,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from zipfile import ZipFile
 
-from . import mbincompiler, paklib, repo
+from . import mbincompiler, merge_mods, paklib, repo
+from .merge_mods import _value_class  # shared helper (defined there; no cycle)
 
 CACHE_DIR = repo.vanilla_cache_dir()
 
@@ -33,8 +34,6 @@ FV_NO_EFFECT = "no_effect"
 FV_FORMAT = "format"
 FV_OUTDATED = "outdated"
 FV_ERROR = "error"
-
-_INT_RE = re.compile(r"^[+-]?\d+$")
 
 
 @dataclass
@@ -85,12 +84,14 @@ def _save_verify_cache(cache: dict) -> None:
 
 
 def _vanilla_fingerprint(index: dict, compiler: dict) -> str:
-    """One string covering the whole vanilla side of every verification."""
+    """One string covering the whole vanilla side of every verification.
+
+    v2 = identity-aware sibling pairing (bump to invalidate after pairing changes)."""
     paks = "|".join(
         f"{name}:{info['size']}:{info.get('mtime')}"
         for name, info in sorted(index.get("paks", {}).items())
     )
-    return f"{index.get('generated')}:{compiler.get('tag')}:{paks}"
+    return f"v2:{index.get('generated')}:{compiler.get('tag')}:{paks}"
 
 
 def _mod_fingerprint(mod, hit) -> str:
@@ -131,43 +132,20 @@ def _ver_from_cache(mod, hit, data: dict) -> FileVerification:
     )
 
 
-def _value_class(value: str | None) -> str:
-    if value is None:
-        return "none"
-    if _INT_RE.match(value):
-        return "int"
-    try:
-        float(value)
-        return "float"
-    except ValueError:
-        return "text"
-
-
 def _diff_children(mod_props, van_props, path: str, issues: list[FieldIssue],
                    stats: dict | None = None) -> None:
     """Match mod children against vanilla children (keep in sync with merge_mods).
 
-    Pairing: ``_id`` -> ``_index`` (missing = insertion) -> positional; ``_remove`` reports a removal row."""
-    van_by_name: dict[str | None, list] = {}
+    Pairing: ``_id`` -> ``_index`` -> name (struct-identity preferred for repeats)."""
     van_by_id: dict[tuple[str | None, str], object] = {}
     van_by_index: dict[tuple[str | None, str], object] = {}
     for vp in van_props:
-        n = vp.get("name")
-        van_by_name.setdefault(n, []).append(vp)
-        vid = vp.get("_id")
+        vid, vidx = vp.get("_id"), vp.get("_index")
         if vid is not None:
-            van_by_id[(n, vid)] = vp
-        vidx = vp.get("_index")
+            van_by_id[(vp.get("name"), vid)] = vp
         if vidx is not None:
-            van_by_index[(n, vidx)] = vp
-    used: set[int] = set()
-    consumed: dict[str | None, int] = {}
-
-    def pick_positional(name):
-        cands = [c for c in van_by_name.get(name, []) if id(c) not in used]
-        idx = consumed.get(name, 0)
-        consumed[name] = idx + 1
-        return cands[idx] if idx < len(cands) else None
+            van_by_index[(vp.get("name"), vidx)] = vp
+    picker = merge_mods.VanillaPicker(van_props)
 
     for mp in mod_props:
         name = mp.get("name")
@@ -185,8 +163,10 @@ def _diff_children(mod_props, van_props, path: str, issues: list[FieldIssue],
                     f"entry keyed _id={mid!r} not found in vanilla",
                 ))
                 continue
+            picker.mark(vp)
         elif mindex is not None and van_by_index.get((name, mindex)) is not None:
             vp = van_by_index[(name, mindex)]
+            picker.mark(vp)
         elif mindex is not None:
             if mremove:
                 # Remove an entry at a position the vanilla list doesn't have.
@@ -200,7 +180,7 @@ def _diff_children(mod_props, van_props, path: str, issues: list[FieldIssue],
                 ))
                 continue
             # No vanilla entry at this position: the mod inserts a new entry.
-            sibling_count = len(van_by_name.get(name, []))
+            sibling_count = sum(1 for c in van_props if c.get("name") == name)
             issues.append(FieldIssue(
                 node_label,
                 f"insert new list entry at position {mindex}",
@@ -210,16 +190,8 @@ def _diff_children(mod_props, van_props, path: str, issues: list[FieldIssue],
                 directive=True,
             ))
             continue
-        elif name is None:
-            # Unnamed property (rare): fall back to positional pairing.
-            unnamed = [c for c in van_props if c.get("name") is None and id(c) not in used]
-            if not unnamed:
-                issues.append(FieldIssue(node_label, None, None, V_MISSING,
-                                         "unnamed property has no vanilla counterpart"))
-                continue
-            vp = unnamed[0]
         else:
-            vp = pick_positional(name)
+            vp = picker.pick(name, mp)
             if vp is None:
                 if mremove:
                     issues.append(FieldIssue(
@@ -236,7 +208,6 @@ def _diff_children(mod_props, van_props, path: str, issues: list[FieldIssue],
                                              "field not present in the current game build"))
                 continue
 
-        used.add(id(vp))
         if mremove:
             issues.append(FieldIssue(
                 node_label,
@@ -299,26 +270,15 @@ def iter_field_rows(mod_root, van_root) -> list[EditorRow]:
 
 
 def _iter_children(mod_props, van_props, path: str, rows: list[EditorRow]) -> None:
-    van_by_name: dict[str | None, list] = {}
     van_by_id: dict[tuple[str | None, str], object] = {}
     van_by_index: dict[tuple[str | None, str], object] = {}
     for vp in van_props:
-        n = vp.get("name")
-        van_by_name.setdefault(n, []).append(vp)
-        vid = vp.get("_id")
+        vid, vidx = vp.get("_id"), vp.get("_index")
         if vid is not None:
-            van_by_id[(n, vid)] = vp
-        vidx = vp.get("_index")
+            van_by_id[(vp.get("name"), vid)] = vp
         if vidx is not None:
-            van_by_index[(n, vidx)] = vp
-    used: set[int] = set()
-    consumed: dict[str | None, int] = {}
-
-    def pick_positional(name):
-        cands = [c for c in van_by_name.get(name, []) if id(c) not in used]
-        idx = consumed.get(name, 0)
-        consumed[name] = idx + 1
-        return cands[idx] if idx < len(cands) else None
+            van_by_index[(vp.get("name"), vidx)] = vp
+    picker = merge_mods.VanillaPicker(van_props)
 
     def add(mp, vp, verdict, note, mod_value=None, van_value=None,
             can_edit=True):
@@ -341,8 +301,10 @@ def _iter_children(mod_props, van_props, path: str, rows: list[EditorRow]) -> No
                     f"entry keyed _id={mid!r} not found in vanilla",
                     _leaf_value(mp), None, can_edit=False)
                 continue
+            picker.mark(vp)
         elif mindex is not None and van_by_index.get((name, mindex)) is not None:
             vp = van_by_index[(name, mindex)]
+            picker.mark(vp)
         elif mindex is not None:
             if mremove:
                 add(mp, None, V_NOOP,
@@ -353,19 +315,18 @@ def _iter_children(mod_props, van_props, path: str, rows: list[EditorRow]) -> No
             add(mp, None, V_INSERT,
                 "the merge inserts this new entry (subtree handled by merge)",
                 f"insert new list entry at position {mindex}",
-                f"vanilla list has {len(van_by_name.get(name, []))} entries",
+                f"vanilla list has {sum(1 for c in van_props if c.get('name') == name)} entries",
                 can_edit=False)
             continue
         elif name is None:
-            unnamed = [c for c in van_props if c.get("name") is None and id(c) not in used]
-            if not unnamed:
+            vp = picker.pick(None, mp)
+            if vp is None:
                 add(mp, None, V_MISSING,
                     "unnamed property has no vanilla counterpart",
                     can_edit=False)
                 continue
-            vp = unnamed[0]
         else:
-            vp = pick_positional(name)
+            vp = picker.pick(name, mp)
             if vp is None:
                 if mremove:
                     add(mp, None, V_NOOP,
@@ -378,7 +339,6 @@ def _iter_children(mod_props, van_props, path: str, rows: list[EditorRow]) -> No
                         _leaf_value(mp), None, can_edit=False)
                 continue
 
-        used.add(id(vp))
         if mremove:
             add(mp, vp, V_REMOVE,
                 "the merge deletes this entry from the list",
@@ -467,19 +427,42 @@ def _read_mod_data(mod, entry: str) -> bytes:
     return ZipFile(path).read(entry)
 
 
-def _duplicate_groups(mod_root) -> dict[int, int]:
+def _van_repeated_paths(van_root) -> set[tuple[str, ...]]:
+    """Name-chain paths where vanilla itself repeats a property name (legit NMS lists)."""
+    out: set[tuple[str, ...]] = set()
+
+    def walk(parent, prefix: tuple[str, ...]) -> None:
+        counts: dict[str, int] = {}
+        for child in parent:
+            if child.tag != "Property" or not child.get("name"):
+                continue
+            n = child.get("name")
+            counts[n] = counts.get(n, 0) + 1
+        for name, n in counts.items():
+            if n >= 2:
+                out.add(prefix + (name,))
+        for child in parent:
+            walk(child, prefix + (child.get("name") or "?",))
+
+    walk(van_root, ())
+    return out
+
+
+def _duplicate_groups(mod_root, van_root=None) -> dict[int, int]:
     """Map id(element) -> group size for same-name siblings repeated in one parent.
 
-    Legitimate list entries (with ``_index``/``_id`` attributes) are not flagged."""
+    Not flagged: positional/keyed list entries and names vanilla itself repeats."""
+    van_repeated = _van_repeated_paths(van_root) if van_root is not None else set()
     groups: dict[int, int] = {}
-    for parent in mod_root.iter():
+
+    def walk(parent, prefix: tuple[str, ...]) -> None:
         by_name: dict[str, list] = {}
         for child in parent:
             if child.tag != "Property" or not child.get("name"):
                 continue
             by_name.setdefault(child.get("name"), []).append(child)
-        for elems in by_name.values():
-            if len(elems) < 2:
+        for name, elems in by_name.items():
+            if len(elems) < 2 or prefix + (name,) in van_repeated:
                 continue
             if all(e.get("_index") is not None for e in elems):
                 continue  # positional list entries
@@ -487,17 +470,25 @@ def _duplicate_groups(mod_root) -> dict[int, int]:
                 continue  # keyed list entries
             for e in elems:
                 groups[id(e)] = len(elems)
+        for child in parent:
+            walk(child, prefix + (child.get("name") or "?",))
+
+    walk(mod_root, ())
     return groups
 
 
-def _duplicate_fields_note(mod_root) -> str:
-    """Human-readable note naming same-name sibling properties repeated
-    within one parent (duplicated struct fields from hand edits)."""
-    if not _duplicate_groups(mod_root):
+def _duplicate_fields_note(mod_root, van_root=None) -> str:
+    """Human-readable note naming same-name sibling properties repeated within one parent.
+
+    Skips names vanilla itself repeats (legit NMS lists) when ``van_root`` is given."""
+    groups = _duplicate_groups(mod_root, van_root)
+    if not groups:
         return ""
+    van_repeated = _van_repeated_paths(van_root) if van_root is not None else set()
     flagged: list[str] = []
     seen: set[int] = set()
-    for parent in mod_root.iter():
+
+    def walk(parent, prefix: tuple[str, ...]) -> None:
         by_name: dict[str, list] = {}
         for child in parent:
             if child.tag != "Property" or not child.get("name"):
@@ -506,12 +497,19 @@ def _duplicate_fields_note(mod_root) -> str:
         for name, elems in by_name.items():
             if len(elems) < 2 or id(elems[0]) in seen:
                 continue
+            if prefix + (name,) in van_repeated:
+                continue
             if all(e.get("_index") is not None for e in elems):
                 continue
             if all(e.get("_id") is not None for e in elems):
                 continue
-            seen.add(id(elems[0]))
-            flagged.append(f"{name} ×{len(elems)}")
+            if all(id(e) in groups for e in elems):
+                seen.add(id(elems[0]))
+                flagged.append(f"{name} ×{len(elems)}")
+        for child in parent:
+            walk(child, prefix + (child.get("name") or "?",))
+
+    walk(mod_root, ())
     if not flagged:
         return ""
     return "note: duplicated field(s) in this file: " + ", ".join(flagged)
@@ -609,7 +607,7 @@ def verify_scan(scan: dict, index: dict, log, only_mod: str | None = None) -> di
                         noops = sum(1 for i in issues if i.noop)
                         if noops:
                             ver.message = f"{noops} edit(s) in this file are no-ops"
-                    dup_note = _duplicate_fields_note(mod_root)
+                    dup_note = _duplicate_fields_note(mod_root, van_tree)
                     if dup_note:
                         ver.message = (
                             f"{ver.message}; {dup_note}" if ver.message else dup_note
