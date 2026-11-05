@@ -1,12 +1,15 @@
 """Pak inspector dialog: browse/search the pak index and pull entries or fields into mods."""
 
+import threading
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QDialog,
     QHBoxLayout,
@@ -31,10 +34,16 @@ _ELEM_ROLE = Qt.ItemDataRole.UserRole  # preview tree: the row's ET element
 _RESULT_CAP = 2000
 _COVERED_COLOR = QColor("#7fbf7f")
 _BIG_PULL = 300  # ask before pulling this many files at once
+_DEEP_WORKERS = 8  # parallel MBINCompiler processes for deep search
+_DEEP_CONFIRM = 2000  # ask before deep-searching more than this many mbin files
 
 
 class PakInspectorDialog(QDialog):
     """Browse/search every indexed pak entry; pull vanilla files or fields into mods."""
+
+    _deep_row = Signal(int, str, str, str)  # gen, stored, pak, match detail
+    _deep_progress = Signal(int, int, int, int)  # gen, paks done, paks total, hits
+    _deep_finished = Signal(int, int, int)  # gen, files scanned, files matched
 
     def __init__(self, index: dict, pcbanks: str, mods: list, settings, parent=None) -> None:
         super().__init__(parent)
@@ -50,6 +59,10 @@ class PakInspectorDialog(QDialog):
         self._preview_ctx = None  # (pak, stored, van_root, template) while previewing
         self._preview_rows: dict[int, QTreeWidgetItem] = {}
         self._adopted: dict[int, str] = {}  # preview elem id -> "added"/"updated"
+        self._deep_stop = threading.Event()
+        self._deep_gen = 0
+        self._key_locks: dict[str, threading.Lock] = {}
+        self._key_locks_master = threading.Lock()
         self._build_coverage()
 
         layout = QVBoxLayout(self)
@@ -69,7 +82,18 @@ class PakInspectorDialog(QDialog):
         )
         self._search.textChanged.connect(self._on_search_changed)
         srow.addWidget(self._search, 1)
+        self._deep_check = QCheckBox("Deep search", self)
+        self._deep_check.setToolTip(
+            "Also match field names and values inside .mbin files.\n"
+            "Decompiles scoped paks in the background (one-time, cached)."
+        )
+        self._deep_check.toggled.connect(self._on_search_changed)
+        srow.addWidget(self._deep_check)
         layout.addLayout(srow)
+        self._deep_row.connect(self._on_deep_row)
+        self._deep_progress.connect(self._on_deep_progress)
+        self._deep_finished.connect(self._on_deep_finished)
+        self._deep_confirmed_scope: str | None = None  # last user-confirmed sweep scope
         self._search_timer = QTimer(self)
         self._search_timer.setSingleShot(True)
         self._search_timer.setInterval(250)
@@ -93,6 +117,13 @@ class PakInspectorDialog(QDialog):
         pv_layout.setContentsMargins(0, 0, 0, 0)
         self._preview_title = QLabel("Preview", self)
         pv_layout.addWidget(self._preview_title)
+        pf_row = QHBoxLayout()
+        pf_row.addWidget(QLabel("Find:", self))
+        self._preview_filter = QLineEdit(self)
+        self._preview_filter.setPlaceholderText("filter fields in preview")
+        self._preview_filter.textChanged.connect(self._apply_preview_filter)
+        pf_row.addWidget(self._preview_filter, 1)
+        pv_layout.addLayout(pf_row)
         self._preview_tree = QTreeWidget(self)
         self._preview_tree.setColumnCount(2)
         self._preview_tree.setHeaderLabels(["Field", "Value"])
@@ -128,6 +159,10 @@ class PakInspectorDialog(QDialog):
 
         self._populate_roots()
         self._update_status()
+
+    def done(self, r) -> None:
+        self._stop_deep()  # no background sweep outlives the dialog
+        super().done(r)
 
     # --- data -------------------------------------------------------------------
 
@@ -273,10 +308,13 @@ class PakInspectorDialog(QDialog):
             self._update_status()
 
     def _on_search_changed(self, _text: str) -> None:
+        # Deep sweeps are expensive to start: give typing a longer pause first.
+        self._search_timer.setInterval(750 if self._deep_check.isChecked() else 250)
         self._search_timer.start()
 
     def _run_search(self, text: str) -> None:
         text = text.strip().lower()
+        self._stop_deep()
         self._tree.clear()
         if not text:
             self._populate_roots()
@@ -291,10 +329,154 @@ class PakInspectorDialog(QDialog):
                         matches.append((stored.replace("\\", "/"), pak))
         for name, pak in sorted(matches, key=lambda m: (m[0].lower(), m[1].lower())):
             self._tree.addTopLevelItem(self._file_item(name, pak, name))
-        base = f"{total} match(es)"
+        base = f"{total} path match(es)"
         self._status.setText(base if len(matches) >= total
                              else f"{base} - showing first {len(matches)}")
         self._pull_btn.setEnabled(bool(matches))
+        if self._deep_check.isChecked():
+            self._start_deep(text)
+
+    # --- deep search (background sweep over scoped paks' mbin contents) ----------
+
+    def _stop_deep(self) -> None:
+        self._deep_gen += 1
+        self._deep_stop.set()
+
+    def _start_deep(self, text: str) -> None:
+        scope = self._pak_filter.text().strip().lower()
+        files = [(pak, s) for pak in self._filtered_paks()
+                 for s in self._pak_files(pak) if s.lower().endswith(".mbin")]
+        if not files:
+            return
+        if len(files) > _DEEP_CONFIRM and scope != self._deep_confirmed_scope:
+            answer = QMessageBox.question(
+                self, "Deep search",
+                f"Deep search decompiles {len(files)} .mbin file(s) in the filtered "
+                "paks (one-time - results are cached and shared with the editor "
+                "and verifier). Continue?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+            self._deep_confirmed_scope = scope
+        self._compiler = self._compiler or mbincompiler.ensure_compiler()
+        self._deep_stop = threading.Event()
+        self._deep_gen += 1
+        gen = self._deep_gen
+        stop = self._deep_stop
+        thread = threading.Thread(
+            target=self._deep_sweep, args=(text, files, stop, gen), daemon=True
+        )
+        thread.start()
+
+    def _key_lock(self, key: str) -> threading.Lock:
+        """Per-cache-entry lock: concurrent decompiles of one file would corrupt it."""
+        with self._key_locks_master:
+            lock = self._key_locks.get(key)
+            if lock is None:
+                lock = threading.Lock()
+                self._key_locks[key] = lock
+            return lock
+
+    def _decompile_van(self, pak: str, stored: str) -> tuple[Path, ET.Element]:
+        """Vanilla mbin -> (mxml path, parsed root); per-key locked, cache-backed."""
+        key = f"{pak}|{stored}|{self._index.get('generated')}"
+        with self._key_lock(key):
+            mxml = _extract_and_decompile(
+                self._pcbanks, pak, stored, self._index, self._log,
+                self._compiler or mbincompiler.ensure_compiler(),
+            )
+            root = ET.fromstring(Path(mxml).read_text(encoding="utf-8", errors="replace"))
+        return Path(mxml), root
+
+    def _deep_sweep(self, text: str, files: list[tuple[str, str]],
+                    stop: threading.Event, gen: int) -> None:
+        """Worker pool: decompile scoped mbin files (cached) and match names/values."""
+        total = len(files)
+        scanned = matched = 0
+        counter_lock = threading.Lock()
+
+        def one(item: tuple[str, str]) -> list[tuple[str, str]]:
+            van_root = self._decompile_van(*item)[1]
+            found: list[tuple[str, str]] = []
+
+            def walk(e: ET.Element, hits: list, needle: str = text) -> None:
+                for c in e.findall("Property"):
+                    name = (c.get("name") or "").lower()
+                    value = (c.get("value") or "").lower()
+                    if needle in name or needle in value:
+                        hits.append((c.get("name") or "?", c.get("value") or ""))
+                    walk(c, hits, needle)
+
+            walk(van_root, found)
+            return found
+
+        with ThreadPoolExecutor(max_workers=_DEEP_WORKERS) as pool:
+            futures = {pool.submit(one, item): item for item in files}
+            for fut in as_completed(futures):
+                if stop.is_set() or gen != self._deep_gen:
+                    for f in futures:
+                        f.cancel()
+                    return
+                item = futures[fut]
+                try:
+                    found = fut.result()
+                except Exception as exc:  # noqa: BLE001 - skip unreadable entries
+                    self._log(f"deep search: {item[1]} ({item[0]}): {exc}")
+                    found = None
+                with counter_lock:
+                    scanned += 1
+                    if found:
+                        matched += 1
+                        detail = "; ".join(f"{n} = {v}" for n, v in found[:3])
+                        if len(found) > 3:
+                            detail += f" (+{len(found) - 3} more)"
+                        self._deep_row.emit(gen, item[1], item[0], detail)
+                    if scanned % 25 == 0 or scanned == total:
+                        self._deep_progress.emit(gen, scanned, total, matched)
+        self._deep_finished.emit(gen, scanned, matched)
+
+    def _on_deep_row(self, gen: int, stored: str, pak: str, detail: str) -> None:
+        if gen != self._deep_gen:
+            return  # stale sweep - its results were superseded
+        item = self._file_item(stored.replace("\\", "/"), pak, stored)
+        item.setToolTip(0, f"deep match: {detail}")
+        self._tree.addTopLevelItem(item)
+
+    def _on_deep_progress(self, gen: int, scanned: int, total: int, hits: int) -> None:
+        if gen != self._deep_gen:
+            return
+        self._status.setText(
+            f"deep search: {scanned}/{total} file(s) - {hits} matched"
+        )
+
+    def _on_deep_finished(self, gen: int, scanned: int, matched: int) -> None:
+        if gen != self._deep_gen or self._deep_stop.is_set():
+            return
+        self._status.setText(
+            f"deep search done: {scanned} file(s) scanned, {matched} matched"
+        )
+
+    def _apply_preview_filter(self, text: str) -> None:
+        """Hide preview rows that don't match (ancestors of matches stay visible)."""
+        text = text.strip().lower()
+        top = self._preview_tree.topLevelItem(0)
+        if top is not None:
+            self._filter_row(top, text)
+
+    def _filter_row(self, item: QTreeWidgetItem, text: str) -> bool:
+        """Return True if this row or any descendant matches; set visibility."""
+        self_match = (not text
+                      or text in item.text(0).lower()
+                      or text in item.text(1).lower())
+        # no any() short-circuit: every child must be visited to clear its state
+        results = [self._filter_row(item.child(i), text)
+                   for i in range(item.childCount())]
+        child_visible = any(results)
+        item.setHidden(not (self_match or child_visible))
+        if child_visible:
+            item.setExpanded(True)
+        return self_match or child_visible
 
     def _update_status(self) -> None:
         paks = self._index.get("total_paks", len(self._index["paks"]))
@@ -325,10 +507,7 @@ class PakInspectorDialog(QDialog):
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
             self._compiler = self._compiler or mbincompiler.ensure_compiler()
-            mxml = _extract_and_decompile(
-                self._pcbanks, pak, stored, self._index, self._log, self._compiler
-            )
-            van_root = ET.fromstring(Path(mxml).read_text(encoding="utf-8", errors="replace"))
+            _mxml, van_root = self._decompile_van(pak, stored)
         except Exception as exc:  # noqa: BLE001 - preview is best-effort
             self._preview_tree.addTopLevelItem(
                 QTreeWidgetItem([f"Decompile failed: {exc}", ""])
@@ -345,6 +524,7 @@ class PakInspectorDialog(QDialog):
         self._preview_ctx = (pak, stored, van_root, template)
         self._adopted = {}
         self._mark_mod_fields()
+        self._apply_preview_filter(self._preview_filter.text())
 
     def _fill_preview(self, parent_item: QTreeWidgetItem, elem: ET.Element) -> None:
         for child in elem.findall("Property"):
@@ -634,10 +814,8 @@ class PakInspectorDialog(QDialog):
     def _pull_content(self, pak: str, stored: str) -> tuple[str, bytes]:
         """Vanilla content for one entry: decompiled EXML for MBINs, raw bytes else."""
         if stored.lower().endswith(".mbin"):
-            mxml = _extract_and_decompile(
-                self._pcbanks, pak, stored, self._index, self._log, self._compiler
-            )
-            return self._exml_rel(stored), Path(mxml).read_bytes()
+            mxml_path, _root = self._decompile_van(pak, stored)
+            return self._exml_rel(stored), Path(mxml_path).read_bytes()
         with paklib.Pak(Path(self._pcbanks) / pak) as pk:
             return stored, pk.read_file(stored)
 

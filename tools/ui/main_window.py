@@ -2763,6 +2763,8 @@ class MainWindow(QMainWindow):
         reindex.triggered.connect(self._on_rebuild_index)
         inspect = menu.addAction("Inspect paks")
         inspect.triggered.connect(self._on_inspect_paks)
+        self._clear_cache_action = menu.addAction("Clear caches")
+        self._clear_cache_action.triggered.connect(self._on_clear_cache)
         menu.addSeparator()
         self._restore_action = menu.addAction("Restore vanilla")
         self._restore_action.setEnabled(False)
@@ -2988,6 +2990,32 @@ class MainWindow(QMainWindow):
             self.append_log(line)
         if dlg.pulled:
             self._scan_mods()
+
+    def _on_clear_cache(self) -> None:
+        """Delete cached vanilla decompiles and transient work dirs (keep results)."""
+        cache = repo.cache_dir()
+        size = sum(f.stat().st_size for f in cache.rglob("*") if f.is_file())
+        answer = QMessageBox.question(
+            self, "Clear caches",
+            f"Delete {size / 1e6:.1f} MB of cached vanilla decompiles?\n\n"
+            "Your mods are untouched. Opening the mod editor and verification will re-decompile on demand.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        keep = {"verify_cache.json", "loose_built.json"}
+        removed = 0
+        for entry in cache.iterdir():
+            if entry.name in keep:
+                continue
+            if entry.is_dir():
+                shutil.rmtree(entry, ignore_errors=True)
+            else:
+                entry.unlink(missing_ok=True)
+            removed += 1
+        self.append_log(f"Cleared caches: {size / 1e6:.1f} MB removed "
+                        f"({removed} item(s)); verify results and loose-rebuild "
+                        "state preserved")
 
     def _on_index_built(self, index: dict) -> None:
         self._index = index
@@ -3958,6 +3986,10 @@ class MainWindow(QMainWindow):
             else "No injectable mods (all injected, installed, or blocked by verification)"
         )
         self._remove_loose_action.setVisible(bool(install_mods._load_state()))
+        cache = repo.cache_dir()
+        self._clear_cache_action.setVisible(
+            cache.exists() and any(cache.iterdir())
+        )
         self._update_action_states()
 
     def _is_installed(self, mod_name: str) -> bool:

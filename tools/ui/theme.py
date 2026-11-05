@@ -135,6 +135,15 @@ QPushButton:hover {{ border-color: rgba(63, 216, 216, 70%); color: white; }}
 QPushButton:pressed {{ background-color: #242030; }}
 QPushButton:disabled {{ color: {DIM}; border-color: {BORDER}; }}
 QCheckBox {{ color: {TEXT}; background: transparent; }}
+QCheckBox::indicator {{
+    width: 14px;
+    height: 14px;
+    border: 1px solid #4a4756;
+    background: {BG_PANEL};
+}}
+QCheckBox::indicator:hover {{ border-color: rgba(63, 216, 216, 70%); }}
+QCheckBox::indicator:checked {{ background: {ACCENT}; border-color: {ACCENT}; }}
+QCheckBox::indicator:disabled {{ border-color: {BORDER}; background: {BG_LIFT}; }}
 QTabWidget::pane {{ border: 1px solid {BORDER}; background: transparent; top: -1px; }}
 QTabBar::tab {{
     background: {BG_PANEL};
