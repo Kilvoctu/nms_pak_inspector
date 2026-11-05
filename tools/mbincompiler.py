@@ -1,6 +1,7 @@
 """MBINCompiler manager: acquire, version, and run the compiler (newest release <= game version)."""
 
 import json
+import os
 import re
 import subprocess
 import time
@@ -19,6 +20,35 @@ LOG_VERSION_RE = re.compile(r"\[VERSION\]: MBINCompiler v(\d+\.\d+\.\d+(?:\.\d+)
 # so the startup check reuses a recent result instead of re-fetching.
 RELEASE_CACHE = repo.cache_dir() / "mbincompiler_releases.json"
 RELEASE_CACHE_TTL_S = 6 * 3600  # auto-checks older than this re-fetch
+
+DOTNET_URL = "https://dotnet.microsoft.com/en-us/download/dotnet/8.0"
+_DOTNET_OK: bool | None = None  # cached result; None = not yet checked
+
+
+def dotnet_runtime_ok() -> bool:
+    """True when a .NET 8 desktop runtime is present (framework-dependent MBINCompiler)."""
+    global _DOTNET_OK
+    if _DOTNET_OK is None:
+        shared = (
+            Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
+            / "dotnet" / "shared" / "Microsoft.WindowsDesktop.App"
+        )
+        if shared.is_dir():
+            _DOTNET_OK = any(d.name.startswith("8.") for d in shared.iterdir())
+        else:  # custom install: ask the CLI (covers DOTNET_ROOT setups)
+            try:
+                result = subprocess.run(
+                    ["dotnet", "--list-runtimes"],
+                    capture_output=True, text=True, timeout=30, check=False,
+                    creationflags=repo._SUBPROCESS_FLAGS,
+                )
+                _DOTNET_OK = any(
+                    line.startswith("Microsoft.WindowsDesktop.App 8.")
+                    for line in (result.stdout or "").splitlines()
+                )
+            except Exception:  # noqa: BLE001 - no dotnet anywhere
+                _DOTNET_OK = False
+    return _DOTNET_OK
 
 
 # --- versions -----------------------------------------------------------------

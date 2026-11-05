@@ -8,6 +8,7 @@ import re
 import shutil
 import subprocess
 import time
+import webbrowser
 import xml.etree.ElementTree as ET
 from collections.abc import Callable
 from pathlib import Path
@@ -2580,6 +2581,7 @@ class MainWindow(QMainWindow):
         self._verify_counts: dict | None = None
         self._conflicts: list | None = None  # FieldConflict list from conflicts.py
         self._compiler_release: dict | None = None  # remote release pending download
+        self._dotnet_warned = False  # only nag about the .NET runtime once per session
         self._inject_state: dict = {}  # inject_mods state: mod name -> files
         self._injecting_mod: str | None = None  # mod whose inject/revert runs
         self._inject_progress: int | None = None  # re-chunk % for the busy label
@@ -3414,6 +3416,22 @@ class MainWindow(QMainWindow):
                 "'Check again' forces a fresh GitHub fetch"
             )
         self._version_status.setToolTip(tooltip)
+        if not mbincompiler.dotnet_runtime_ok() and not self._dotnet_warned:
+            self._dotnet_warned = True
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Icon.Warning)
+            box.setWindowTitle(".NET 8 runtime missing")
+            box.setText(
+                "MBINCompiler requires the .NET 8 Desktop Runtime, which doesn't "
+                "appear to be installed.\nVerification, editing, and injection "
+                "will fail until it is.\n\nOpen the download page?"
+            )
+            box.setStandardButtons(
+                QMessageBox.StandardButton.Open | QMessageBox.StandardButton.Ignore
+            )
+            box.setDefaultButton(QMessageBox.StandardButton.Open)
+            if box.exec() == QMessageBox.StandardButton.Open:
+                webbrowser.open(mbincompiler.DOTNET_URL)
         if release:
             self._compiler_action.setText(f"Download MBINCompiler {release['tag']}")
             self._compiler_action.setToolTip(

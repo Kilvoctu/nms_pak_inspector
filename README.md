@@ -17,9 +17,9 @@ Simple tool that can inspect, edit, and install No Man's Sky mods. This app is b
 2. Download/clone this repo.
 3. Run `build_exe.bat` and wait until it's done.
 4. Run `NMSPakInspector.exe`.
-5. Optional: click `Check for compiler updates` in the menu (it downloads MBINCompiler when a newer release is available).
+5. Optional: click `Check for compiler updates` in the menu.
 6. Point the app at your game folder and your mods folder; on first launch it builds a pak index (takes a moment).
-7. Poke around and figure out the rest (start with `Inspect paks` in the ☰ menu).
+7. Poke around and figure out the rest.
 
 
 ## Features
