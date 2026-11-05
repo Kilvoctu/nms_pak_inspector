@@ -1299,43 +1299,9 @@ class _CompareTrees(QWidget):
 
     def _pull_into_mod(self, van_elem) -> None:
         """Adopt a vanilla field into the mod (minimal container chain, value = vanilla's)."""
-        van_parents = {c: p for p in self._van_root.iter() for c in p}
-        chain = []
-        node = van_elem
-        while node is not None and node is not self._van_root:
-            chain.append(node)
-            node = van_parents.get(node)
-        chain.reverse()  # top-level ... target
-
-        mod_children = list(self._mod_root.findall("Property"))
-        van_siblings = list(self._van_root.findall("Property"))
-        cur_parent = self._mod_root
-        consumed: set[int] = set()
-        for van_node in chain[:-1]:
-            counterpart = self._mod_counterpart(
-                mod_children, van_node, van_siblings, consumed
-            )
-            if counterpart is None:
-                # Structural copy: pairing attrs + type value, no children.
-                counterpart = ET.Element("Property")
-                for attr in ("name", "value", "_id", "_index"):
-                    if van_node.get(attr) is not None:
-                        counterpart.set(attr, van_node.get(attr))
-                cur_parent.append(counterpart)
-            cur_parent = counterpart
-            mod_children = list(cur_parent.findall("Property"))
-            van_siblings = list(van_node.findall("Property"))
-
-        target = chain[-1]
-        if target.findall("Property"):
-            new_elem = copy.deepcopy(target)  # whole entry adoption
-        else:
-            new_elem = ET.Element("Property")
-            for attr in ("name", "value", "_id", "_index"):
-                if target.get(attr) is not None:
-                    new_elem.set(attr, target.get(attr))
-        cur_parent.append(new_elem)
-
+        new_elem, _action = merge_mods.adopt_vanilla_field(
+            self._mod_root, self._van_root, van_elem
+        )
         self.rebuild()
         self.edited.emit()
         # Select the new node and open its inline editor, ready to type.
@@ -1352,26 +1318,6 @@ class _CompareTrees(QWidget):
                     self._left.editItem(item, 0)
                 return
             stack.extend(item.child(i) for i in range(item.childCount()))
-
-    def _mod_counterpart(self, mod_children, van_node, van_siblings,
-                         consumed: set[int]):
-        """Find the mod-side counterpart of one vanilla node (keyed pairing),
-        or None when the mod doesn't have it yet."""
-        name = van_node.get("name")
-        vid, vidx = van_node.get("_id"), van_node.get("_index")
-        if vid is not None:
-            return next(
-                (c for c in mod_children if c.get("_id") == vid), None
-            )
-        if vidx is not None:
-            return next(
-                (c for c in mod_children if c.get("_index") == vidx), None
-            )
-        for c in mod_children:
-            if c.get("name") == name and id(c) not in consumed:
-                consumed.add(id(c))
-                return c
-        return None
 
     def _find_van_parent(self, mod_elem):
         """Vanilla parent of the mod element's pairing, if it has one."""

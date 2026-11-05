@@ -244,6 +244,76 @@ def merged_mxml_bytes(merged_root: ET.Element) -> bytes:
     return ET.tostring(merged_root, encoding="utf-8", xml_declaration=True)
 
 
+def _keyed_counterpart(mod_children, van_node, van_siblings, consumed: set[int]):
+    """Find the mod-side counterpart of one vanilla node (keyed pairing), or None."""
+    name = van_node.get("name")
+    vid, vidx = van_node.get("_id"), van_node.get("_index")
+    if vid is not None:
+        return next((c for c in mod_children if c.get("_id") == vid), None)
+    if vidx is not None:
+        return next((c for c in mod_children if c.get("_index") == vidx), None)
+    for c in mod_children:
+        if c.get("name") == name and id(c) not in consumed:
+            consumed.add(id(c))
+            return c
+    return None
+
+
+def adopt_vanilla_field(mod_root: ET.Element, van_root: ET.Element,
+                        van_elem: ET.Element, update: bool = False) -> tuple[ET.Element, str]:
+    """Adopt a vanilla field into the mod tree (minimal container chain, vanilla value).
+    Returns (element, "added"|"updated"); ``update`` edits an existing counterpart."""
+    van_parents = {c: p for p in van_root.iter() for c in p}
+    chain = []
+    node = van_elem
+    while node is not None and node is not van_root:
+        chain.append(node)
+        node = van_parents.get(node)
+    chain.reverse()  # top-level ... target
+
+    mod_children = list(mod_root.findall("Property"))
+    van_siblings = list(van_root.findall("Property"))
+    cur_parent = mod_root
+    consumed: set[int] = set()
+    for van_node in chain[:-1]:
+        counterpart = _keyed_counterpart(mod_children, van_node, van_siblings, consumed)
+        if counterpart is None:
+            # Structural copy: pairing attrs + type value, no children.
+            counterpart = ET.Element("Property")
+            for attr in ("name", "value", "_id", "_index"):
+                if van_node.get(attr) is not None:
+                    counterpart.set(attr, van_node.get(attr))
+            cur_parent.append(counterpart)
+        cur_parent = counterpart
+        mod_children = list(cur_parent.findall("Property"))
+        van_siblings = list(van_node.findall("Property"))
+
+    target = chain[-1]
+    if update:
+        counterpart = _keyed_counterpart(mod_children, target, van_siblings, consumed)
+        if counterpart is not None:
+            if target.findall("Property"):
+                for c in list(counterpart.findall("Property")):
+                    counterpart.remove(c)
+                for c in copy.deepcopy(target.findall("Property")):
+                    counterpart.append(c)
+            else:
+                for attr in ("value", "_id", "_index"):
+                    if target.get(attr) is not None:
+                        counterpart.set(attr, target.get(attr))
+            return counterpart, "updated"
+
+    if target.findall("Property"):
+        new_elem = copy.deepcopy(target)  # whole entry adoption
+    else:
+        new_elem = ET.Element("Property")
+        for attr in ("name", "value", "_id", "_index"):
+            if target.get(attr) is not None:
+                new_elem.set(attr, target.get(attr))
+    cur_parent.append(new_elem)
+    return new_elem, "added"
+
+
 def merged_to_mbin(merged_root: ET.Element, work_dir, stem: str) -> bytes:
     """Serialize a merged tree and compile it. Returns the MBIN bytes."""
     mxml = Path(work_dir) / f"{stem}.MXML"
