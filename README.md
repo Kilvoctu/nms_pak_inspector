@@ -3,8 +3,13 @@
 Simple tool that can inspect, edit, and install No Man's Sky mods. This app is built mainly for personal use.
 
 <p align="center">
-  <a href="assets/preview.png"><img src="assets/preview.png" height="320" alt="NMS Pak Inspector"></a>
-  <a href="assets/preview2.png"><img src="assets/preview2.png" height="320" alt="Mod file editor"></a>
+<table>
+  <tr>
+    <td width="33%"><a href="assets/preview.png"><img src="assets/preview.png" width="100%" alt="Main window"></a></td>
+    <td width="33%"><a href="assets/preview2.png"><img src="assets/preview2.png" width="100%" alt="Mod file editor"></a></td>
+    <td width="33%"><a href="assets/preview3.png"><img src="assets/preview3.png" width="100%" alt="Pak inspector"></a></td>
+  </tr>
+</table>
 </p>
 
 ## Setup/Usage

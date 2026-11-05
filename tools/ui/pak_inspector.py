@@ -7,8 +7,8 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QImage, QPixmap
+from PySide6.QtCore import QByteArray, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QFont, QFontDatabase, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -20,7 +20,9 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMenu,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
+    QSizePolicy,
     QSplitter,
     QTreeWidget,
     QTreeWidgetItem,
@@ -40,6 +42,17 @@ _COVERED_COLOR = QColor("#7fbf7f")
 _BIG_PULL = 300  # ask before pulling this many files at once
 _DEEP_WORKERS = 8  # parallel MBINCompiler processes for deep search
 _DEEP_CONFIRM = 2000  # ask before deep-searching more than this many mbin files
+
+_TEXT_EXTS = {".txt", ".xml", ".json", ".csv", ".vdf", ".fnt", ".ini", ".log", ".md"}
+_RAW_LABELS = {
+    ".wem": "Wwise audio - playback needs external conversion; pull it to edit externally.",
+    ".bnk": "Wwise sound bank - binary; pull it to edit externally.",
+    ".pck": "Wwise audio package - binary; pull it to edit externally.",
+    ".spv": "compiled SPIR-V shader - binary; pull it to edit externally.",
+    ".pc": "compiled geometry/animation data - binary; pull it to edit externally.",
+    ".sqs": "texture cache - binary; pull it to edit externally.",
+}
+_TEXT_PREVIEW_CAP = 65536  # bytes shown in the raw text preview
 
 
 class PakInspectorDialog(QDialog):
@@ -131,6 +144,9 @@ class PakInspectorDialog(QDialog):
         pv_layout = QVBoxLayout(preview_box)
         pv_layout.setContentsMargins(0, 0, 0, 0)
         self._preview_title = QLabel("Preview", self)
+        # long paths must not grow the pane's min width (would shove the splitter)
+        self._preview_title.setSizePolicy(QSizePolicy.Policy.Ignored,
+                                          QSizePolicy.Policy.Preferred)
         pv_layout.addWidget(self._preview_title)
         pf_row = QHBoxLayout()
         self._preview_find_label = QLabel("Find:", self)
@@ -154,11 +170,20 @@ class PakInspectorDialog(QDialog):
         self._preview_image = QLabel(self)
         self._preview_image.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._preview_image.setWordWrap(True)
+        self._preview_image.setSizePolicy(QSizePolicy.Policy.Ignored,
+                                          QSizePolicy.Policy.Ignored)
         self._preview_image.hide()
         pv_layout.addWidget(self._preview_image, 1)
+        self._preview_text = QPlainTextEdit(self)
+        self._preview_text.setReadOnly(True)
+        self._preview_text.hide()
+        pv_layout.addWidget(self._preview_text, 1)
         pv_hint = QLabel("Right-click field(s) to pull them into the target mod.", self)
         pv_layout.addWidget(pv_hint)
         split.addWidget(preview_box)
+        split.setChildrenCollapsible(False)
+        split.setStretchFactor(0, 1)  # dialog resizes go to the left pane
+        split.setStretchFactor(1, 0)
         split.setSizes([640, 460])
         layout.addWidget(split, 1)
 
@@ -586,12 +611,10 @@ class PakInspectorDialog(QDialog):
         if stored.lower().endswith(".dds"):
             self._show_dds_preview(pak, stored)
             return
-        self._preview_mode(tree=True)
         if not stored.lower().endswith(".mbin"):
-            self._preview_tree.addTopLevelItem(
-                QTreeWidgetItem(["(raw file - no preview; pull it to edit externally)", ""])
-            )
+            self._show_raw_preview(pak, stored)
             return
+        self._preview_mode("tree")
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
             self._compiler = self._compiler or mbincompiler.ensure_compiler()
@@ -718,16 +741,18 @@ class PakInspectorDialog(QDialog):
                 row.setForeground(1, _COVERED_COLOR)
                 row.setToolTip(0, f"Adopted into {mod.name} ({action})" if mod else "")
 
-    def _preview_mode(self, tree: bool) -> None:
-        """Toggle the preview pane between the field tree and the image label."""
-        self._preview_tree.setVisible(tree)
-        self._preview_filter.setVisible(tree)
-        self._preview_find_label.setVisible(tree)
-        self._preview_image.setVisible(not tree)
+    def _preview_mode(self, pane: str) -> None:
+        """Show one preview pane: "tree" (fields), "text" (raw), or "image"."""
+        is_tree = pane == "tree"
+        self._preview_tree.setVisible(is_tree)
+        self._preview_filter.setVisible(is_tree)
+        self._preview_find_label.setVisible(is_tree)
+        self._preview_text.setVisible(pane == "text")
+        self._preview_image.setVisible(pane == "image")
 
     def _show_dds_preview(self, pak: str, stored: str) -> None:
         """Render a DDS entry as a scaled thumbnail (Pillow decodes BC formats)."""
-        self._preview_mode(tree=False)
+        self._preview_mode("image")
         self._preview_tree.clear()
         self._preview_ctx = None
         try:
@@ -750,6 +775,62 @@ class PakInspectorDialog(QDialog):
                 f"(no thumbnail for this DDS format: {exc})\n"
                 "Pull it to edit externally."
             )
+            self._preview_title.setText(f"Preview: {stored}")
+
+    def _show_raw_preview(self, pak: str, stored: str) -> None:
+        """Text / font-specimen / labeled placeholder for non-mbin, non-dds entries."""
+        self._preview_ctx = None
+        self._preview_rows = {}
+        low = stored.lower()
+        try:
+            with paklib.Pak(Path(self._pcbanks) / pak) as pk:
+                data = pk.read_file(stored)
+        except Exception as exc:  # noqa: BLE001 - preview is best-effort
+            self._preview_mode("tree")
+            self._preview_tree.clear()
+            self._preview_tree.addTopLevelItem(QTreeWidgetItem([f"Read failed: {exc}", ""]))
+            return
+        if low.endswith((".ttf", ".ttc")):
+            self._font_specimen(data, stored)
+            return
+        ext = "." + low.rsplit(".", 1)[-1] if "." in low else ""
+        if ext in _TEXT_EXTS or (data[:1] and b"\x00" not in data[:4096]):
+            self._preview_mode("text")
+            text = data[:_TEXT_PREVIEW_CAP].decode("utf-8", errors="replace")
+            if len(data) > _TEXT_PREVIEW_CAP:
+                text += f"\n\n... (showing first {_TEXT_PREVIEW_CAP // 1024} KB " \
+                        f"of {len(data):,} bytes)"
+            self._preview_text.setPlainText(text)
+            return
+        label = _RAW_LABELS.get(ext, "(no preview for this file type; pull it to edit externally)")
+        self._preview_mode("tree")
+        self._preview_tree.clear()
+        self._preview_tree.addTopLevelItem(QTreeWidgetItem([label, ""]))
+
+    def _font_specimen(self, data: bytes, stored: str) -> None:
+        """Render a TTF/TTC entry as a specimen image using the embedded font."""
+        self._preview_mode("image")
+        try:
+            fid = QFontDatabase.addApplicationFontFromData(QByteArray(data))
+            fams = QFontDatabase.applicationFontFamilies(fid)
+            if not fams:
+                raise ValueError("no font families detected")
+            img = QImage(440, 220, QImage.Format.Format_ARGB32_Premultiplied)
+            img.fill(QColor("#14121a"))
+            p = QPainter(img)
+            p.setPen(QColor("#e3e1e9"))
+            fam = fams[0]
+            p.setFont(QFont(fam, 13))
+            p.drawText(20, 48, f"{fam}")
+            p.setFont(QFont(fam, 22))
+            p.drawText(20, 110, "AaBbCcDdEeFf 0123")
+            p.drawText(20, 160, "The quick brown fox")
+            p.drawText(20, 200, "abcdefghijk 0.5 -42")
+            p.end()
+            self._preview_image.setPixmap(QPixmap.fromImage(img))
+            self._preview_title.setText(f"Preview: {stored}  (font '{fam}')")
+        except Exception as exc:  # noqa: BLE001 - preview is best-effort
+            self._preview_image.setText(f"(no font preview: {exc})\nPull it to edit externally.")
             self._preview_title.setText(f"Preview: {stored}")
 
     def _selected_preview_elems(self) -> list[ET.Element]:
