@@ -1461,7 +1461,7 @@ class _AboutDialog(QDialog):
         )
         layout.addWidget(name_label)
         body_label = QLabel(
-            "A simple tool that can verify, inspect, and install No Man's Sky mods",
+            "A simple tool that can inspect, edit, and install No Man's Sky mods",
             self,
         )
         body_label.setWordWrap(True)
@@ -2822,8 +2822,8 @@ class MainWindow(QMainWindow):
         self._inject_all_action.triggered.connect(self._on_inject_all)
         self._audit_action = menu.addAction("Audit injected mods")
         self._audit_action.triggered.connect(self._on_audit_action)
-        remove_loose = menu.addAction("Remove loose installs")
-        remove_loose.triggered.connect(self._on_remove_loose)
+        self._remove_loose_action = menu.addAction("Remove loose installs")
+        self._remove_loose_action.triggered.connect(self._on_remove_loose)
         menu.addSeparator()
         expand_all = menu.addAction("Expand all")
         expand_all.triggered.connect(self._tree.expandAll)
@@ -3972,20 +3972,20 @@ class MainWindow(QMainWindow):
 
     def _refresh_actions(self) -> None:
         busy = self._worker is not None
+        # Inject-only menu entries hide entirely when nothing is injected.
+        self._restore_action.setVisible(bool(self._inject_state))
+        self._audit_action.setVisible(bool(self._inject_state))
         if self._inject_state:
             self._restore_action.setEnabled(not busy)
             self._restore_action.setToolTip(
                 f"Reverts all {len(self._inject_state)} injected mod(s), restoring "
                 "the vanilla pak bytes from the managed pre-injection backups"
             )
-        else:
-            self._restore_action.setEnabled(False)
-            self._restore_action.setToolTip("Nothing is injected into the paks")
-        self._audit_action.setEnabled(not busy and bool(self._inject_state))
-        self._audit_action.setToolTip(
-            "Checks every injected file against its pre-injection backup "
-            "(MBIN round-trip, DDS headers, pak integrity) and ranks crash suspects"
-        )
+            self._audit_action.setEnabled(not busy)
+            self._audit_action.setToolTip(
+                "Checks every injected file against its pre-injection backup "
+                "(MBIN round-trip, DDS headers, pak integrity) and ranks crash suspects"
+            )
         eligible = self._eligible_mods()
         self._inject_all_action.setEnabled(not busy and bool(eligible))
         self._inject_all_action.setToolTip(
@@ -3993,6 +3993,7 @@ class MainWindow(QMainWindow):
             if eligible
             else "No injectable mods (all injected, installed, or blocked by verification)"
         )
+        self._remove_loose_action.setVisible(bool(install_mods._load_state()))
         self._update_action_states()
 
     def _is_installed(self, mod_name: str) -> bool:
