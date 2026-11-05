@@ -8,7 +8,7 @@ Simple tool that can inspect, edit, and install No Man's Sky mods. This app is b
 </p>
 
 ## Setup/Usage
-1. Have Python 3.10+ and the [.NET 8 Desktop Runtime (x64)](https://dotnet.microsoft.com/en-us/download/dotnet/8.0) (required by MBINCompiler).
+1. Have Python 3.10 - 3.15 and the [.NET 8 Desktop Runtime (x64)](https://dotnet.microsoft.com/en-us/download/dotnet/8.0) (required by MBINCompiler).
 2. Download/clone this repo.
 3. Run `build_exe.bat` and wait until it's done.
 4. Run `NMSPakInspector.exe`.
