@@ -7,11 +7,11 @@ import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
-from zipfile import ZipFile
 
 from PySide6.QtCore import QThread, Signal
 
 from .. import (
+    archivelib,
     index_paks,
     inject_mods,
     install_mods,
@@ -100,27 +100,24 @@ def index_worker(log, pcbanks: str) -> dict:
 _GAME_TOP_DIRS = {"GLOBALS", "MODELS", "TEXTURES", "SCRIPTS", "SOUND", "ANIMATIONS"}
 
 
-def _zip_wrapper_name(zip_path: Path) -> str | None:
-    """The single top-level folder inside a zip (Nexus-style wrapper = better display name).
+def _zip_wrapper_name(archive_path: Path) -> str | None:
+    """The single top-level folder inside a mod archive (Nexus-style wrapper = display name).
 
-    None at zip root (except loose .lua/.txt), multiple folders, or game-content dirs."""
+    None at archive root (except loose .lua/.txt), multiple folders, or game-content dirs."""
     tops: set[str] = set()
     try:
-        with ZipFile(zip_path) as z:
-            for n in z.namelist():
-                if n.endswith("/"):
-                    continue
-                n = n.replace("\\", "/")
-                if "/" not in n:
-                    base = n.rsplit("/", 1)[-1]
-                    if os.path.splitext(base)[1].lower() not in locate_mod.SKIP_EXT:
-                        return None  # loose GAME file at the zip root
-                    continue  # loose non-game file: irrelevant
-                top = n.split("/", 1)[0]
-                tops.add(top)
-                if len(tops) > 1:
-                    return None
-    except Exception:  # noqa: BLE001 - unreadable zip: keep the stem name
+        for n in archivelib.open_archive(archive_path).names():
+            n = n.replace("\\", "/")
+            if "/" not in n:
+                base = n.rsplit("/", 1)[-1]
+                if os.path.splitext(base)[1].lower() not in locate_mod.SKIP_EXT:
+                    return None  # loose GAME file at the archive root
+                continue  # loose non-game file: irrelevant
+            top = n.split("/", 1)[0]
+            tops.add(top)
+            if len(tops) > 1:
+                return None
+    except Exception:  # noqa: BLE001 - unreadable archive: keep the stem name
         return None
     if len(tops) != 1:
         return None
@@ -143,7 +140,7 @@ def _mod_sources(
     for p in sorted(mods_dir.iterdir()):
         if p.name.startswith("."):
             continue
-        if p.is_file() and p.suffix.lower() == ".zip":
+        if p.is_file() and archivelib.is_archive(p):
             zip_wrappers[p] = _zip_wrapper_name(p)
         elif p.is_dir():
             root = p
@@ -245,7 +242,8 @@ def stash_replaced_zip(zip_path: str, mods_dir: str) -> str:
     dest = dest_dir / Path(zip_path).name
     if dest.exists():
         dest = dest_dir / (
-            Path(zip_path).stem + time.strftime(" %Y-%m-%d %H%M%S") + ".zip"
+            Path(zip_path).stem + time.strftime(" %Y-%m-%d %H%M%S")
+            + Path(zip_path).suffix
         )
     shutil.move(zip_path, dest)
     return str(dest)
@@ -254,8 +252,7 @@ def stash_replaced_zip(zip_path: str, mods_dir: str) -> str:
 def _mod_entries(root: Path, kind: str) -> list[str]:
     """All file entries of a mod, '/'-separated, relative to its root."""
     if kind == "zip":
-        with ZipFile(root) as z:
-            return [n for n in z.namelist() if not n.endswith("/")]
+        return archivelib.open_archive(root).names()
     return [
         str(f.relative_to(root)).replace("\\", "/")
         for f in sorted(root.rglob("*"))

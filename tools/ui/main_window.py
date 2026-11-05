@@ -9,7 +9,6 @@ import shutil
 import subprocess
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from zipfile import ZipFile
 
 from PySide6.QtCore import (
     QByteArray,
@@ -75,6 +74,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import (
+    archivelib,
     audit_injected,
     index_paks,
     inject_mods,
@@ -2422,21 +2422,12 @@ class _FieldDialog(QDialog):
             if source.is_dir():
                 (source / self._hit.entry).write_bytes(data)
             else:
-                self._rewrite_zip_entry(source, self._hit.entry, data)
+                archivelib.rewrite_entry(source, self._hit.entry, data)
         except Exception as exc:  # noqa: BLE001 - surfaced in the dialog
             QMessageBox.critical(self, "Save failed", f"{type(exc).__name__}: {exc}")
             return
         self.saved = True
         self.accept()
-
-    @staticmethod
-    def _rewrite_zip_entry(zip_path: Path, entry: str, data: bytes) -> None:
-        tmp = zip_path.with_suffix(".zip.editing")
-        with ZipFile(zip_path) as zin, ZipFile(tmp, "w") as zout:
-            for info in zin.infolist():
-                payload = data if info.filename == entry else zin.read(info.filename)
-                zout.writestr(info, payload)
-        os.replace(tmp, zip_path)
 
     def reject(self) -> None:
         if self._dirty:
@@ -4556,7 +4547,7 @@ class MainWindow(QMainWindow):
             p = Path(url.toLocalFile()) if url.isLocalFile() else None
             if p is None or not p.exists():
                 continue
-            if (p.is_file() and p.suffix.lower() == ".zip") or p.is_dir():
+            if (p.is_file() and archivelib.is_archive(p)) or p.is_dir():
                 out.append(p)
         return out
 

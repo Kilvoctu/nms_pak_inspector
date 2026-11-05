@@ -7,9 +7,8 @@ import shutil
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from zipfile import ZipFile
 
-from . import mbincompiler, merge_mods, repo
+from . import archivelib, mbincompiler, merge_mods, repo
 from .inject_mods import _vanilla_root
 from .merge_mods import MergeError
 from .verify_mods import _extract_and_decompile, _parse_mod_tree, _read_mod_data
@@ -52,7 +51,7 @@ def _save_build_cache(cache: dict) -> None:
 
 
 def _source_stamps(mods: dict) -> dict:
-    """Cheap per-entry [size, mtime] stamps for every mod source (one zip pass each)."""
+    """Cheap per-entry [size, crc] stamps for every mod source (archive headers only)."""
     stamps: dict[str, dict] = {}
     for name, mod in mods.items():
         path = Path(mod.path)
@@ -66,14 +65,12 @@ def _source_stamps(mods: dict) -> dict:
                     entry_stamps[hit.entry] = None
         else:
             try:
-                with ZipFile(path) as z:
-                    infos = {i.filename: i for i in z.infolist()}
+                arc = archivelib.open_archive(path)
+                infos = {n: arc.info(n) for n in arc.names()}
                 for hit in mod.game_files:
                     info = infos.get(hit.entry)
-                    entry_stamps[hit.entry] = (
-                        [info.file_size, list(info.date_time)] if info else None
-                    )
-            except (OSError, RuntimeError):
+                    entry_stamps[hit.entry] = [info[0], info[1]] if info else None
+            except (OSError, RuntimeError, ValueError):
                 entry_stamps = {h.entry: None for h in mod.game_files}
         stamps[name] = entry_stamps
     return stamps

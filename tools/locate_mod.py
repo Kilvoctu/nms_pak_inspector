@@ -7,9 +7,8 @@ import glob as globmod
 import hashlib
 import os
 import sys
-import zipfile
 
-from . import index_paks, repo
+from . import archivelib, index_paks, repo
 
 DEFAULT_INDEX = str(repo.index_file())
 
@@ -81,7 +80,7 @@ def game_rel_path(name: str) -> str:
 
 
 def mod_entries(path: str) -> list[str]:
-    """All file entries of a mod ('/'-separated): zip members or folder files."""
+    """All file entries of a mod ('/'-separated): archive members or folder files."""
     if os.path.isdir(path):
         out = []
         for root, _dirs, files in os.walk(path):
@@ -89,8 +88,7 @@ def mod_entries(path: str) -> list[str]:
                 full = os.path.join(root, f)
                 out.append(os.path.relpath(full, path).replace("\\", "/"))
         return sorted(out)
-    with zipfile.ZipFile(path) as z:
-        return [n for n in z.namelist() if not n.endswith("/")]
+    return archivelib.open_archive(path).names()
 
 
 def locate_zip(zip_path: str, hashmap: dict):

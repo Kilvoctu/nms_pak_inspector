@@ -9,9 +9,8 @@ import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
-from zipfile import ZipFile
 
-from . import mbincompiler, merge_mods, paklib, repo
+from . import archivelib, mbincompiler, merge_mods, paklib, repo
 from .merge_mods import _value_class  # shared helper (defined there; no cycle)
 
 CACHE_DIR = repo.vanilla_cache_dir()
@@ -129,13 +128,12 @@ def _vanilla_fingerprint(index: dict, compiler: dict) -> str:
 
 
 def _mod_fingerprint(mod, hit) -> str:
-    """Cheap content identity of one mod file (no data reads for zips)."""
+    """Cheap content identity of one mod file (no data reads for archives)."""
     if mod.kind == "zip":
-        with ZipFile(mod.path) as z:
-            info = z.getinfo(hit.entry)
+        size, crc = archivelib.open_archive(mod.path).info(hit.entry)
         st = os.stat(mod.path)
         return (
-            f"zip:{mod.path}:{hit.entry}:{info.CRC}:{info.file_size}:"
+            f"zip:{mod.path}:{hit.entry}:{crc}:{size}:"
             f"{st.st_size}:{int(st.st_mtime)}"
         )
     st = (Path(mod.path) / hit.entry).stat()
@@ -478,11 +476,11 @@ def _parse_mod_tree(entry: str, data: bytes, work_dir: Path, log) -> ET.Element:
 
 
 def _read_mod_data(mod, entry: str) -> bytes:
-    """Read one file from a mod (zip archive or loose folder root)."""
+    """Read one file from a mod (zip/7z/rar archive or loose folder root)."""
     path = Path(mod.path)
     if path.is_dir():
         return (path / entry).read_bytes()
-    return ZipFile(path).read(entry)
+    return archivelib.open_archive(path).read(entry)
 
 
 def _van_repeated_paths(van_root) -> set[tuple[str, ...]]:
