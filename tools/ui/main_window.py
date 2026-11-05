@@ -492,7 +492,7 @@ class _CollisionDialog(QDialog):
         parent=None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Collision detail")
+        self.setWindowTitle("Collision Detail")
         self.setMinimumWidth(560)
         layout = QVBoxLayout(self)
         header = QLabel(f"Pak path assigned by {len(entries)} mods:")
@@ -1442,7 +1442,7 @@ class _NexusInfoDialog(QDialog):
 
     def __init__(self, mod_name: str, result: dict, parent=None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Nexus info")
+        self.setWindowTitle("Nexus Info")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(8)
@@ -1556,7 +1556,7 @@ class _NexusKeyDialog(QDialog):
 
     def __init__(self, current: str, parent=None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Nexus API key")
+        self.setWindowTitle("Nexus API Key")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(10)
@@ -1605,7 +1605,7 @@ class _NexusUpdatesDialog(QDialog):
 
     def __init__(self, result: dict, parent=None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Nexus update check")
+        self.setWindowTitle("Nexus Update Check")
         layout = QVBoxLayout(self)
 
         updates = result.get("updates") or []
@@ -1680,7 +1680,7 @@ class _RawConflictsDialog(QDialog):
 
     def __init__(self, conflicts: list, parent=None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Raw file conflicts")
+        self.setWindowTitle("Raw File Conflicts")
         layout = QVBoxLayout(self)
         intro = QLabel(
             "These files cannot be merged (not property trees) - each is "
@@ -1735,7 +1735,7 @@ class _MergeDialog(QDialog):
         n_conflicts = sum(
             len(f["conflicts"]) for f in preview["files"].values()
         )
-        self.setWindowTitle("Merge mods for injection")
+        self.setWindowTitle("Merge Mods for Injection")
         self.setMinimumSize(720, 480)
         layout = QVBoxLayout(self)
 
@@ -2917,7 +2917,7 @@ class MainWindow(QMainWindow):
         headline = message.splitlines()[0].strip() or "Task failed"
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Icon.Critical)
-        box.setWindowTitle("Task failed")
+        box.setWindowTitle("Task Failed")
         box.setText(headline)
         if len(message.splitlines()) > 1 or len(message) > 240:
             box.setDetailedText(message)
@@ -3108,7 +3108,7 @@ class MainWindow(QMainWindow):
             else:
                 lean = "Some of the old archives have matching file names."
             box = QMessageBox(self)
-            box.setWindowTitle("Mod update")
+            box.setWindowTitle("Mod Update")
             box.setText(
                 f"Two archives come from Nexus mod page {new_parsed['mod_id']}."
                 if new_parsed

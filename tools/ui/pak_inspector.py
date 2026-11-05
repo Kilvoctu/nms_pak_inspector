@@ -1,5 +1,6 @@
 """Pak inspector dialog: browse/search the pak index and pull entries or fields into mods."""
 
+import json
 import threading
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -42,12 +43,12 @@ class PakInspectorDialog(QDialog):
     """Browse/search every indexed pak entry; pull vanilla files or fields into mods."""
 
     _deep_row = Signal(int, str, str, str)  # gen, stored, pak, match detail
-    _deep_progress = Signal(int, int, int, int)  # gen, paks done, paks total, hits
-    _deep_finished = Signal(int, int, int)  # gen, files scanned, files matched
+    _deep_status = Signal(int, str)  # gen, progress text
+    _deep_finished = Signal(int, int, int)  # gen, files matched, templates matched
 
     def __init__(self, index: dict, pcbanks: str, mods: list, settings, parent=None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Pak inspector - PCBANKS")
+        self.setWindowTitle("Pak Inspector - PCBANKS")
         self.resize(1100, 720)
         self._index = index
         self._pcbanks = pcbanks
@@ -84,14 +85,15 @@ class PakInspectorDialog(QDialog):
         srow.addWidget(self._search, 1)
         self._deep_check = QCheckBox("Deep search", self)
         self._deep_check.setToolTip(
-            "Also match field names and values inside .mbin files.\n"
-            "Decompiles scoped paks in the background (one-time, cached)."
+            "Also match template and field names inside .mbin files.\n"
+            "Uses a template index (built once per game version): header scan\n"
+            "plus one decompile per distinct template - no per-file decompiling."
         )
         self._deep_check.toggled.connect(self._on_search_changed)
         srow.addWidget(self._deep_check)
         layout.addLayout(srow)
         self._deep_row.connect(self._on_deep_row)
-        self._deep_progress.connect(self._on_deep_progress)
+        self._deep_status.connect(self._on_deep_status)
         self._deep_finished.connect(self._on_deep_finished)
         self._deep_confirmed_scope: str | None = None  # last user-confirmed sweep scope
         self._search_timer = QTimer(self)
@@ -343,7 +345,7 @@ class PakInspectorDialog(QDialog):
         if self._deep_check.isChecked():
             self._start_deep(text)
 
-    # --- deep search (background sweep over scoped paks' mbin contents) ----------
+    # --- deep search (template-index lookup: names, no per-file decompiling) ------
 
     def _stop_deep(self) -> None:
         self._deep_gen += 1
@@ -351,16 +353,21 @@ class PakInspectorDialog(QDialog):
 
     def _start_deep(self, text: str) -> None:
         scope = self._pak_filter.text().strip().lower()
-        files = [(pak, s) for pak in self._filtered_paks()
-                 for s in self._pak_files(pak) if s.lower().endswith(".mbin")]
-        if not files:
+        paks = self._filtered_paks()
+        if not paks:
             return
-        if len(files) > _DEEP_CONFIRM and scope != self._deep_confirmed_scope:
+        tidx = self._load_tidx()
+        to_scan = [p for p in paks if p not in tidx["paks"]]
+        to_decompile = sum(
+            1 for p in to_scan for s in self._pak_files(p) if s.lower().endswith(".mbin")
+        )
+        if (len(to_scan) > 10 or to_decompile > _DEEP_CONFIRM) \
+                and scope != self._deep_confirmed_scope:
             answer = QMessageBox.question(
                 self, "Deep search",
-                f"Deep search decompiles {len(files)} .mbin file(s) in the filtered "
-                "paks (one-time - results are cached and shared with the editor "
-                "and verifier). Continue?",
+                f"Deep search builds a one-time template index first: header-scanning "
+                f"{len(to_scan)} pak(s) (~{to_decompile} files) and decompiling one "
+                "representative per template. Continue?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
             if answer != QMessageBox.StandardButton.Yes:
@@ -372,7 +379,7 @@ class PakInspectorDialog(QDialog):
         gen = self._deep_gen
         stop = self._deep_stop
         thread = threading.Thread(
-            target=self._deep_sweep, args=(text, files, stop, gen), daemon=True
+            target=self._deep_job, args=(text, paks, stop, gen), daemon=True
         )
         thread.start()
 
@@ -396,52 +403,107 @@ class PakInspectorDialog(QDialog):
             root = ET.fromstring(Path(mxml).read_text(encoding="utf-8", errors="replace"))
         return Path(mxml), root
 
-    def _deep_sweep(self, text: str, files: list[tuple[str, str]],
-                    stop: threading.Event, gen: int) -> None:
-        """Worker pool: decompile scoped mbin files (cached) and match names/values."""
-        total = len(files)
-        scanned = matched = 0
-        counter_lock = threading.Lock()
+    def _load_tidx(self) -> dict:
+        """The per-index-build template index: file->hash map + hash->fields dictionary."""
+        f = repo.cache_dir() / "templates.json"
+        if f.exists():
+            try:
+                t = json.loads(f.read_text(encoding="utf-8"))
+                if t.get("index_generated") == self._index.get("generated"):
+                    return t
+            except (OSError, ValueError):
+                pass
+        return {"index_generated": self._index.get("generated"),
+                "paks": {}, "templates": {}}
 
-        def one(item: tuple[str, str]) -> list[tuple[str, str]]:
-            van_root = self._decompile_van(*item)[1]
-            found: list[tuple[str, str]] = []
+    def _save_tidx(self, tidx: dict) -> None:
+        f = repo.cache_dir() / "templates.json"
+        tmp = f.with_suffix(".tmp")
+        tmp.write_text(json.dumps(tidx), encoding="utf-8")
+        tmp.replace(f)
 
-            def walk(e: ET.Element, hits: list, needle: str = text) -> None:
-                for c in e.findall("Property"):
-                    name = (c.get("name") or "").lower()
-                    value = (c.get("value") or "").lower()
-                    if needle in name or needle in value:
-                        hits.append((c.get("name") or "?", c.get("value") or ""))
-                    walk(c, hits, needle)
-
-            walk(van_root, found)
-            return found
-
+    def _ensure_template_index(self, paks: list[str], stop: threading.Event,
+                               gen: int) -> dict | None:
+        """Build the template index incrementally: header scan + representative
+        decompiles. Returns the index, or None when cancelled."""
+        tidx = self._load_tidx()
+        to_scan = [p for p in paks if p not in tidx["paks"]]
+        for i, pak in enumerate(to_scan):
+            fmap: dict[str, str] = {}
+            with paklib.Pak(Path(self._pcbanks) / pak) as pk:
+                for stored in self._pak_files(pak):
+                    if stop.is_set() or gen != self._deep_gen:
+                        return None
+                    if not stored.lower().endswith(".mbin"):
+                        continue
+                    head = pk.read_file(stored)[:16]
+                    if len(head) >= 16:
+                        fmap[stored] = head[12:16].hex()
+            tidx["paks"][pak] = fmap
+            self._deep_status.emit(gen, f"template index: scanned pak {i + 1}/{len(to_scan)}")
+        rep: dict[str, tuple[str, str]] = {}
+        for pak, fmap in tidx["paks"].items():
+            for stored, hh in fmap.items():
+                if hh not in tidx["templates"] and hh not in rep:
+                    rep[hh] = (pak, stored)
+        if rep:
+            self._deep_status.emit(
+                gen, f"template index: decompiling {len(rep)} template(s)…"
+            )
         with ThreadPoolExecutor(max_workers=_DEEP_WORKERS) as pool:
-            futures = {pool.submit(one, item): item for item in files}
-            for fut in as_completed(futures):
+            futs = {pool.submit(self._decompile_van, *r): hh for hh, r in rep.items()}
+            for fut in as_completed(futs):
                 if stop.is_set() or gen != self._deep_gen:
-                    for f in futures:
+                    for f in futs:
                         f.cancel()
-                    return
-                item = futures[fut]
+                    return None
+                hh = futs[fut]
                 try:
-                    found = fut.result()
+                    _mxml, root = fut.result()
                 except Exception as exc:  # noqa: BLE001 - skip unreadable entries
-                    self._log(f"deep search: {item[1]} ({item[0]}): {exc}")
-                    found = None
-                with counter_lock:
-                    scanned += 1
-                    if found:
-                        matched += 1
-                        detail = "; ".join(f"{n} = {v}" for n, v in found[:3])
-                        if len(found) > 3:
-                            detail += f" (+{len(found) - 3} more)"
-                        self._deep_row.emit(gen, item[1], item[0], detail)
-                    if scanned % 25 == 0 or scanned == total:
-                        self._deep_progress.emit(gen, scanned, total, matched)
-        self._deep_finished.emit(gen, scanned, matched)
+                    self._log(f"template index: {exc}")
+                    continue
+                fields = sorted({c.get("name") or "?" for c in root.iter()
+                                 if c.get("name")})
+                tidx["templates"][hh] = {
+                    "name": root.get("template") or "?", "fields": fields,
+                }
+                self._deep_status.emit(
+                    gen, f"template index: {len(tidx['templates'])} template(s) known"
+                )
+        self._save_tidx(tidx)
+        return tidx
+
+    def _deep_job(self, text: str, paks: list[str], stop: threading.Event,
+                  gen: int) -> None:
+        tidx = self._ensure_template_index(paks, stop, gen)
+        if tidx is None:
+            return
+        needle = text.strip().lower()
+        if not needle:
+            return
+        matched: dict[str, tuple[str, str]] = {}
+        for hh, t in tidx["templates"].items():
+            hit_fields = [f for f in t["fields"] if needle in f.lower()]
+            if needle in t["name"].lower():
+                matched[hh] = (t["name"], f"template {t['name']} matches")
+            elif hit_fields:
+                show = ", ".join(hit_fields[:3])
+                if len(hit_fields) > 3:
+                    show += f" (+{len(hit_fields) - 3} more)"
+                matched[hh] = (t["name"], f"{t['name']}: {show}")
+        rows = []
+        for pak in paks:
+            for stored, hh in tidx["paks"].get(pak, {}).items():
+                if hh in matched:
+                    _name, detail = matched[hh]
+                    rows.append((stored.replace("\\", "/"), pak, stored, detail))
+        rows.sort()
+        for i, (_disp, pak, stored, detail) in enumerate(rows[:_RESULT_CAP]):
+            if stop.is_set() or gen != self._deep_gen:
+                return
+            self._deep_row.emit(gen, stored, pak, detail)
+        self._deep_finished.emit(gen, len(rows), len(matched))
 
     def _on_deep_row(self, gen: int, stored: str, pak: str, detail: str) -> None:
         if gen != self._deep_gen:
@@ -450,18 +512,15 @@ class PakInspectorDialog(QDialog):
         item.setToolTip(0, f"deep match: {detail}")
         self._tree.addTopLevelItem(item)
 
-    def _on_deep_progress(self, gen: int, scanned: int, total: int, hits: int) -> None:
-        if gen != self._deep_gen:
-            return
-        self._status.setText(
-            f"deep search: {scanned}/{total} file(s) - {hits} matched"
-        )
+    def _on_deep_status(self, gen: int, text: str) -> None:
+        if gen == self._deep_gen:
+            self._status.setText(text)
 
-    def _on_deep_finished(self, gen: int, scanned: int, matched: int) -> None:
+    def _on_deep_finished(self, gen: int, files: int, templates: int) -> None:
         if gen != self._deep_gen or self._deep_stop.is_set():
             return
         self._status.setText(
-            f"deep search done: {scanned} file(s) scanned, {matched} matched"
+            f"deep search done: {files} file(s) matched via {templates} template(s)"
         )
 
     def _apply_preview_filter(self, text: str) -> None:
