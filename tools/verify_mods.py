@@ -120,12 +120,12 @@ def _save_verify_cache(cache: dict) -> None:
 def _vanilla_fingerprint(index: dict, compiler: dict) -> str:
     """One string covering the whole vanilla side of every verification.
 
-    v3 = identity pairing + template leniency + comment stripping (bump on engine changes)."""
+    v4 = scene-node Name annotations in field paths (bump on engine changes)."""
     paks = "|".join(
         f"{name}:{info['size']}:{info.get('mtime')}"
         for name, info in sorted(index.get("paks", {}).items())
     )
-    return f"v3:{index.get('generated')}:{compiler.get('tag')}:{paks}"
+    return f"v4:{index.get('generated')}:{compiler.get('tag')}:{paks}"
 
 
 def _mod_fingerprint(mod, hit) -> str:
@@ -265,7 +265,10 @@ def _pair(mp, vp, node_path: str, issues: list[FieldIssue],
     if mod_children:
         # Directives against an empty vanilla list simply recurse: each child
         # then reports its own intent (e.g. "remove - empty list, no-op").
-        _diff_children(mod_children, van_children, node_path + "/", issues, stats)
+        _diff_children(
+            mod_children, van_children, node_path + _name_suffix(mp) + "/",
+            issues, stats,
+        )
     elif van_children:
         issues.append(FieldIssue(node_path, _leaf_value(mp), None,
                                  V_MISSING, "vanilla nests children here, mod is a flat leaf"))
@@ -303,6 +306,16 @@ def iter_field_rows(mod_root, van_root) -> list[EditorRow]:
     _iter_children(list(mod_root.findall("Property")),
                    list(van_root.findall("Property")), "", rows)
     return rows
+
+
+def _name_suffix(elem) -> str:
+    """Scene-node annotation: the node's Name leaf value (TkSceneNode pattern)."""
+    if elem.get("name") == "Children":
+        leaf = elem.find("Property[@name='Name']")
+        value = leaf.get("value") if leaf is not None else None
+        if value:
+            return f'["{value}"]'
+    return ""
 
 
 def _iter_children(mod_props, van_props, path: str, rows: list[EditorRow]) -> None:
@@ -387,14 +400,20 @@ def _iter_children(mod_props, van_props, path: str, rows: list[EditorRow]) -> No
             if mod_children and not van_children:
                 # Directives against an empty vanilla list recurse (same as
                 # _diff_children); a real child edit reports as MISSING below.
-                _iter_children(mod_children, van_children, path + name + "/", rows)
+                _iter_children(
+                    mod_children, van_children,
+                    path + name + _name_suffix(mp) + "/", rows,
+                )
                 continue
             if van_children and not mod_children:
                 add(mp, vp, V_MISSING,
                     "vanilla nests children here, mod is a flat leaf",
                     _leaf_value(mp), None, can_edit=False)
                 continue
-            _iter_children(mod_children, van_children, path + name + "/", rows)
+            _iter_children(
+                mod_children, van_children,
+                path + name + _name_suffix(mp) + "/", rows,
+            )
             continue
         mod_value = mp.get("value")
         van_value = vp.get("value")

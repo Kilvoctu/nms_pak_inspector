@@ -2006,10 +2006,29 @@ class _FieldDialog(QDialog):
         layout.addWidget(self._fix_fmt_btn)
 
         self._tabs = QTabWidget(self)
-        self._changed_table = self._make_table()
-        self._all_table = self._make_table()
-        self._tabs.addTab(self._changed_table, "Changed fields")
-        self._tabs.addTab(self._all_table, "All fields")
+        fields_page = QWidget(self)
+        fields_layout = QVBoxLayout(fields_page)
+        fields_layout.setContentsMargins(0, 4, 0, 0)
+        filter_row = QHBoxLayout()
+        self._field_search = QLineEdit(fields_page)
+        self._field_search.setPlaceholderText("Filter fields…")
+        self._field_search.setClearButtonEnabled(True)
+        self._field_search.textChanged.connect(self._on_field_filter_changed)
+        filter_row.addWidget(self._field_search, 1)
+        self._changed_only = QCheckBox("Changed only", fields_page)
+        self._changed_only.setChecked(
+            bool(_settings().value("editor_changed_only", True))
+        )
+        self._changed_only.toggled.connect(self._on_field_filter_changed)
+        self._changed_only.setToolTip(
+            "Hide fields whose value equals vanilla (unchecked shows every "
+            "field the mod file contains). Remembered across sessions."
+        )
+        filter_row.addWidget(self._changed_only)
+        fields_layout.addLayout(filter_row)
+        self._fields_table = self._make_table()
+        fields_layout.addWidget(self._fields_table, 1)
+        self._tabs.addTab(fields_page, "Mod fields")
         self._compare = _CompareTrees(self._mod_root, van_root, True, self)
         self._compare.edited.connect(self._on_compare_edited)
         self._tabs.addTab(self._compare, "Compare trees")
@@ -2063,9 +2082,13 @@ class _FieldDialog(QDialog):
         table = QTableWidget(0, 4, self)
         table.setHorizontalHeaderLabels(["Field", "Mod value", "Vanilla value", "Verdict"])
         table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        # Value columns are fitted per fill (bounded resize-to-contents, see
+        # _fit_value_columns) so Verdict stays visible without horizontal scroll.
+        for col in (1, 2, 3):
+            table.horizontalHeader().setSectionResizeMode(
+                col, QHeaderView.ResizeMode.Interactive
+            )
+        table.setColumnWidth(3, 96)
         table.verticalHeader().setVisible(False)
         table.setAlternatingRowColors(True)
         table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -2085,9 +2108,24 @@ class _FieldDialog(QDialog):
 
     def _refresh_rows(self) -> None:
         """Re-enumerate the (possibly edited) mod tree against vanilla."""
-        rows = verify_mods.iter_field_rows(self._mod_root, self._van_root)
-        self._all_rows = rows
-        self._changed_rows = [r for r in rows if r.verdict != verify_mods.V_SAME]
+        self._all_rows = verify_mods.iter_field_rows(self._mod_root, self._van_root)
+
+    def _visible_field_rows(self) -> list:
+        """The mod-field rows passing the Changed-only checkbox and search box."""
+        rows = self._all_rows
+        if self._changed_only.isChecked():
+            rows = [r for r in rows if r.verdict != verify_mods.V_SAME]
+        needle = self._field_search.text().strip().lower()
+        if needle:
+            rows = [
+                r for r in rows
+                if needle in _pretty_path(r.path).lower()
+                or needle in (r.mod_value or "").lower()
+                or needle in (r.vanilla_value or "").lower()
+                or needle in r.verdict.lower()
+                or needle in (r.note or "").lower()
+            ]
+        return rows
 
     def _fill_table(self, table: QTableWidget, rows: list) -> None:
         self._dups = verify_mods._duplicate_groups(self._mod_root, self._van_root)
@@ -2098,13 +2136,22 @@ class _FieldDialog(QDialog):
         for row, r in enumerate(rows):
             dup_n = self._dups.get(id(getattr(r, "mod_elem", None)))
             texts = (
-                r.path + ("  [duplicate]" if dup_n else ""),
+                _pretty_path(r.path) + ("  [duplicate]" if dup_n else ""),
                 r.mod_value if r.mod_value is not None else "—",
                 r.vanilla_value if r.vanilla_value is not None else "—",
                 r.verdict,
             )
             for col, text in enumerate(texts):
                 item = QTableWidgetItem(text)
+                if col == 0:
+                    value_tip = _pretty_path(r.path)  # the cell text may clip
+                elif col in (1, 2) and r.mod_value is not None:
+                    value_tip = (
+                        f"{_pretty_path(r.path)}\nmod: {r.mod_value}\n"
+                        f"vanilla: {r.vanilla_value}"
+                    )
+                else:
+                    value_tip = ""
                 if col == 1 and r.can_edit:
                     item.setFlags(item.flags() | editable)
                 else:
@@ -2126,22 +2173,37 @@ class _FieldDialog(QDialog):
                         "vanilla pane and 'Pull into mod'"
                     )
                 if tip:
-                    item.setToolTip(tip)
+                    item.setToolTip(f"{value_tip}\n\n{tip}" if value_tip else tip)
+                elif value_tip:
+                    item.setToolTip(value_tip)  # values clip: hover shows full text
                 table.setItem(row, col, item)
             verdict_item = table.item(row, 3)
             verdict_item.setForeground(self._VERDICT_COLOR.get(r.verdict, COLOR_DIM))
             if r.note:
                 verdict_item.setText(r.verdict + " *")
         table.blockSignals(False)
+        self._fit_value_columns(table)
+
+    def _fit_value_columns(self, table: QTableWidget) -> None:
+        """Bounded resize-to-contents: value columns hug their widest value but
+        clamp (long scene paths clip, tooltips carry the full text)."""
+        caps = {1: 300, 2: 300, 3: 96}
+        for col, cap in caps.items():
+            table.resizeColumnToContents(col)
+            table.setColumnWidth(col, min(table.columnWidth(col) + 12, cap))
 
     def _rebuild_tables(self) -> None:
         self._refresh_rows()
         has_format = any(r.verdict == verify_mods.V_FORMAT for r in self._all_rows)
         self._fix_fmt_btn.setVisible(has_format)
-        self._fill_table(self._changed_table, self._changed_rows)
-        self._fill_table(self._all_table, self._all_rows)
+        self._fill_table(self._fields_table, self._visible_field_rows())
         if self._tabs.currentWidget() is self._preview_tree:
             self._preview_tree.set_data(self._mod_root, self._van_root)
+
+    def _on_field_filter_changed(self, *_args) -> None:
+        """Search box / Changed-only toggled: re-apply the mod-fields filter."""
+        _settings().setValue("editor_changed_only", self._changed_only.isChecked())
+        self._fill_table(self._fields_table, self._visible_field_rows())
 
     # --- editing -----------------------------------------------------------------
 
@@ -2393,6 +2455,30 @@ class _FieldDialog(QDialog):
         super().done(result)
 
 
+def _pretty_path(path: str) -> str:
+    """Compact field path: drop the list-wrapper hop before named scene nodes
+    (Children/Children["X"] -> Children["X"]) and collapse repeated segments."""
+    parts = path.split("/")
+    kept: list[str] = []
+    for i, seg in enumerate(parts):
+        if (
+            seg == "Children"
+            and i + 1 < len(parts)
+            and parts[i + 1].startswith('Children["')
+        ):
+            continue  # list-wrapper hop: the named node segment says it all
+        kept.append(seg)
+    out: list[str] = []
+    for seg in kept:
+        if out:
+            base, _, n = out[-1].partition("×")
+            if base == seg:
+                out[-1] = f"{base}×{int(n or 1) + 1}"
+                continue
+        out.append(seg)
+    return "/".join(out)
+
+
 def _verdict_tooltip(ver) -> str:
     """Short tooltip text summarizing one file's verification."""
     changed = [i for i in ver.fields if i.verdict != "OK"]
@@ -2400,7 +2486,10 @@ def _verdict_tooltip(ver) -> str:
     if ver.message:
         lines.append(ver.message)
     for issue in changed[:8]:
-        lines.append(f"[{issue.verdict}] {issue.path}: {issue.mod_value} (vanilla {issue.vanilla_value})")
+        lines.append(
+            f"[{issue.verdict}] {_pretty_path(issue.path)}: "
+            f"{issue.mod_value} (vanilla {issue.vanilla_value})"
+        )
     if len(changed) > 8:
         lines.append(f"… and {len(changed) - 8} more (right-click → Inspect fields…)")
     return _wrap_tooltip("\n".join(lines))
