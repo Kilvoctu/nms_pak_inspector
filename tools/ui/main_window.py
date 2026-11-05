@@ -96,6 +96,7 @@ from ..conflicts import (
     compute_field_conflicts,
 )
 from . import theme
+from .pak_inspector import PakInspectorDialog
 from .worker import (
     FileHit,
     ModScan,
@@ -2814,6 +2815,8 @@ class MainWindow(QMainWindow):
         rescan.triggered.connect(self._scan_mods)
         reindex = menu.addAction("Rebuild pak index")
         reindex.triggered.connect(self._on_rebuild_index)
+        inspect = menu.addAction("Inspect paks")
+        inspect.triggered.connect(self._on_inspect_paks)
         menu.addSeparator()
         self._restore_action = menu.addAction("Restore vanilla")
         self._restore_action.setEnabled(False)
@@ -3024,6 +3027,21 @@ class MainWindow(QMainWindow):
         self._start_task(
             index_worker, self._current_pcbanks(), on_done=self._on_index_built
         )
+
+    def _on_inspect_paks(self) -> None:
+        """Open the pak inspector; rescan afterwards if it pulled files into mods."""
+        if self._index is None or not self._current_pcbanks():
+            self.append_log("Cannot inspect paks: no pak index / PCBANKS folder yet")
+            return
+        mods = self._scan["mods"] if self._scan else []
+        dlg = PakInspectorDialog(
+            self._index, self._current_pcbanks(), mods, self._settings, self
+        )
+        dlg.exec()
+        for line in dlg._log_lines:
+            self.append_log(line)
+        if dlg.pulled:
+            self._scan_mods()
 
     def _on_index_built(self, index: dict) -> None:
         self._index = index
