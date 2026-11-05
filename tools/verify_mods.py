@@ -69,7 +69,7 @@ class FileVerification:
 # A cache hit is equivalent to a fresh verify (status, fields, message).
 
 VERIFY_CACHE = repo.cache_dir() / "verify_cache.json"
-OVERRIDES_FILE = repo.project_root() / "verify_overrides.json"
+OVERRIDES_FILE = repo.verify_overrides_file()
 
 _PAK_FILE_CACHE: dict[str, set[str]] = {}
 

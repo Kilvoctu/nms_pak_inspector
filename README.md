@@ -1,9 +1,10 @@
-#  <img src="icon.ico" alt="icon" align="top" width="36"> NMS Pak Inspector
+#  <img src="assets/icon.ico" alt="icon" align="top" width="36"> NMS Pak Inspector
 
-Simple tool that can verify, inspect, and install No Man's Sky mods. This app is built mainly for personal use.
+Simple tool that can inspect, edit, and install No Man's Sky mods. This app is built mainly for personal use.
 
 <p align="center">
-  <a href="preview.png"><img src="preview.png" width="700" alt="NMS Pak Inspector" title="The UI may look a bit different, but I don't feel like updating this screenshot."></a>
+  <a href="assets/preview.png"><img src="assets/preview.png" height="320" alt="NMS Pak Inspector"></a>
+  <a href="assets/preview2.png"><img src="assets/preview2.png" height="320" alt="Mod file editor"></a>
 </p>
 
 ## Setup/Usage
@@ -11,26 +12,26 @@ Simple tool that can verify, inspect, and install No Man's Sky mods. This app is
 2. Download/clone this repo.
 3. Run `build_exe.bat` and wait until it's done.
 4. Run `NMSPakInspector.exe`.
-5. Optional: click `Check for compiler updates` in the menu (it downloads MBINCompiler when a newer release is available (kept in mbincompilers/)).
+5. Optional: click `Check for compiler updates` in the menu (it downloads MBINCompiler when a newer release is available).
 6. Point the app at your game folder and your mods folder; on first launch it builds a pak index (takes a moment).
 7. Poke around and figure out the rest.
 
 
 ## Features
-- Lists mods from your mod folder; drag and drop archives or folders onto the window to add them.
-- Checks mod files against No Man's Sky's pak data without touching the game files; shows what's broken, outdated, or has no effect anymore.
-- Inject mod data straight into the game's pak data, only changing what needs to be rewritten.
-- Or standard loose installation into `GAMEDATA\MODS` (mutually exclusive with injection).
-- Mod merge ability when multiple mods touch the same file.
-- Automatic pre-injection backups with byte-exact revert.
+- Lists mods from your mod folder; drag and drop archives (.zip/.7z/.rar) or folders onto the window to add them.
+- Checks mod files against No Man's Sky's pak data without touching the game files; shows what's broken, outdated, ineffectual, etc.
 - Per mod inline editor with side-by-side tree comparison; diff highlighting, preview, format auto-fix, raw-asset inspector.
+- Ability to merge or resolve conflicts when multiple mods touch the same file.
+- Inject mod data into the game's pak data, only changing what needs to be rewritten.
+- or standard loose installation into `GAMEDATA\MODS` into a single managed folder.
+- Automatic backup of modified pak files before injection, with restore option.
 - Basic NexusMods support shows author, description, local and latest release, and mod page link. Nexus API key required, no premium needed.
-- Automatically detects game updates (restored vanilla paks): clears injection state, rebuilds the index, and re-verifies everything.
+- Automatically detects NMS version: clears injection state, rebuilds the index, and re-verifies everything.
 
 ## Notes
-- NMS shows a "tampering" warning on launch when vanilla paks are modified (loads them fine).
-- Mods with outdated/error files can't be injected or installed until the mod is updated for the current game version.
-- This app is provided as-is, do not expect it to be user-friendly or bug-free, and it *can* brick your game. Use at your own risk.
+- NMS shows a "tampering" warning on launch when vanilla paks are modified via injection.
+- Mods with outdated/error files can't be injected or installed until the mod is updated.
+- This app is provided as-is, don't expect it to be user-friendly or bug-free; messing with pak files *can* brick your game. Use at your own risk.
 
 ## Credits & license
 

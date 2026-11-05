@@ -2,13 +2,13 @@
 
 import os
 
-ICON = "icon.ico" if os.path.exists("icon.ico") else None
+ICON = "assets/icon.ico" if os.path.exists("assets/icon.ico") else None
 
 a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[('icon.ico', '.')],
+    datas=[('assets/icon.ico', '.')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

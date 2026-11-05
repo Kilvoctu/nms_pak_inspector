@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -40,6 +41,7 @@ from PySide6.QtGui import (
     QPainter,
     QPalette,
     QPixmap,
+    QPolygon,
     QRadialGradient,
     QShortcut,
     QShowEvent,
@@ -132,8 +134,9 @@ COLOR_DIM = theme.COLOR_DIM
 
 _TREE_COLUMNS = ["MOD", "STATUS", "FIELDS", "TARGET PAK(S)", "FILES", "ACTIONS"]
 _TREE_COLUMN_WIDTHS = (
-    (0, 300), (1, 115), (2, 90), (3, 230), (4, 50), (5, 170),
+    (0, 300), (1, 115), (2, 90), (3, 230), (4, 50), (5, 112),
 )
+_OLD_ACTIONS_WIDTH = 170  # two-button layout; migrate saved widths silently
 _ACTION_ROLE = Qt.ItemDataRole.UserRole + 1  # per-mod action state (dict)
 _SCANTIP_ROLE = Qt.ItemDataRole.UserRole + 2  # scan-derived part of a file tooltip
 
@@ -144,7 +147,6 @@ _PATH_LABEL_WIDTH = 78  # aligns the Mods folder / PCBANKS path rows
 _PROJECT_ROOT = repo.project_root()
 _DEFAULT_MODS_DIR = repo.mods_dir()
 _INDEX_PATH = repo.index_file()
-_LOCK_PATH = _PROJECT_ROOT / "nms_pak_injector.lock"
 
 # Status keys shared by tree rows and tooltips.
 ST_CLEAN = "clean"
@@ -181,7 +183,7 @@ _FIELDS_WORST_FIRST = [FV_ERROR, FV_OUTDATED, FV_FORMAT, FV_NO_EFFECT, FV_VERIFI
 def _settings():
     from PySide6.QtCore import QSettings
 
-    return QSettings(str(_PROJECT_ROOT / "state.ini"), QSettings.Format.IniFormat)
+    return QSettings(str(repo.state_file()), QSettings.Format.IniFormat)
 
 
 def _restored_geometry(raw: object) -> QByteArray | None:
@@ -545,6 +547,8 @@ class _CollisionDialog(QDialog):
 class _RowActionDelegate(QStyledItemDelegate):
     """Paints the per-mod action buttons into the Actions column; clicks route to handlers."""
 
+    _SLIVER = 14  # arrow sliver on the button's right edge (opens the menu)
+
     def __init__(self, tree: QTreeWidget, on_action, parent=None) -> None:
         super().__init__(parent)
         self._tree = tree
@@ -558,12 +562,12 @@ class _RowActionDelegate(QStyledItemDelegate):
     # --- geometry -----------------------------------------------------------
 
     def _button_rects(self, cell: QRect) -> tuple[QRect, QRect]:
-        margins, gap = 5, 6
+        margins = 5
         area = cell.adjusted(margins, 3, -margins, -3)
-        w = (area.width() - gap) // 2
+        sliver = self._SLIVER
         return (
-            QRect(area.left(), area.top(), w, area.height()),
-            QRect(area.left() + w + gap, area.top(), area.width() - w - gap, area.height()),
+            QRect(area.left(), area.top(), area.width(), area.height()),
+            QRect(area.right() - sliver + 1, area.top(), sliver, area.height()),
         )
 
     def sizeHint(self, option, index) -> QSize:
@@ -581,12 +585,12 @@ class _RowActionDelegate(QStyledItemDelegate):
         if not state or state.get("busy"):
             return None
         rect = self._tree.visualRect(index)
-        primary, secondary = self._button_rects(rect)
+        primary, arrow = self._button_rects(rect)
         local = pos  # viewport coords == visualRect coords
+        if arrow.contains(local) and state.get("menu", ("", False))[0]:
+            return (index.row(), "menu")
         if primary.contains(local):
             return (index.row(), "primary")
-        if secondary.contains(local):
-            return (index.row(), "secondary")
         return None
 
     # --- event filter: hover + click -----------------------------------------
@@ -613,7 +617,7 @@ class _RowActionDelegate(QStyledItemDelegate):
                     index = self._tree.indexAt(pos)
                     name_item = self._tree.itemFromIndex(index.sibling(index.row(), 0))
                     if name_item is not None:
-                        self._on_action(name_item.text(0), hit[1])
+                        self._on_action(name_item.text(0), hit[1], index)
                 self._pressed = None
                 self._tree.viewport().update()
         elif etype == QEvent.Type.Leave:
@@ -642,21 +646,28 @@ class _RowActionDelegate(QStyledItemDelegate):
             painter.restore()
             return
         hover = index.row() == self._hover_row
-        primary, secondary = self._button_rects(option.rect)
+        primary, arrow = self._button_rects(option.rect)
+        mouse = self._mouse_pos or QPoint(-1, -1)
+        menu_label, menu_enabled = state.get("menu", ("", False))
+        has_menu = bool(menu_label)
+        # Center the label on the clickable part, excluding the arrow sliver.
         self._paint_button(
             painter, primary, state["primary"][0], state["primary"][1],
-            hover and primary.contains(self._mouse_pos or QPoint(-1, -1)),
+            hover and primary.contains(mouse) and not (has_menu and arrow.contains(mouse)),
             self._pressed == (index.row(), "primary"),
+            text_rect=primary.adjusted(0, 0, -self._SLIVER, 0),
         )
-        self._paint_button(
-            painter, secondary, state["secondary"][0], state["secondary"][1],
-            hover and secondary.contains(self._mouse_pos or QPoint(-1, -1)),
-            self._pressed == (index.row(), "secondary"),
+        self._paint_arrow(
+            painter, arrow,
+            hover and arrow.contains(mouse),
+            self._pressed == (index.row(), "menu"),
+            menu_enabled,
+            show_triangle=has_menu,
         )
         painter.restore()
 
     def _paint_button(self, painter, rect: QRect, label: str, enabled: bool,
-                      hovered: bool, pressed: bool) -> None:
+                      hovered: bool, pressed: bool, text_rect: QRect | None = None) -> None:
         if not label:
             return
         painter.save()
@@ -670,7 +681,28 @@ class _RowActionDelegate(QStyledItemDelegate):
         painter.setBrush(QColor(fill))
         painter.drawRect(rect.adjusted(0, 0, -1, -1))  # sharp corners, NMS style
         painter.setPen(QColor(text))
-        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, label)
+        painter.drawText(text_rect or rect, Qt.AlignmentFlag.AlignCenter, label)
+        painter.restore()
+
+    def _paint_arrow(self, painter, rect: QRect, hovered: bool, pressed: bool,
+                     enabled: bool, show_triangle: bool) -> None:
+        """Divider line (always, for visual balance) + down triangle when a menu exists."""
+        painter.save()
+        painter.setPen(QColor("#3a3744"))
+        painter.drawLine(rect.left(), rect.top() + 3, rect.left(), rect.bottom() - 3)
+        if show_triangle:
+            if not enabled:
+                color = "#5a5864"
+            elif pressed or hovered:
+                color = "#ffffff"
+            else:
+                color = "#e8e6ee"
+            cx, cy = rect.center().x(), rect.center().y()
+            painter.setPen(QColor(color))
+            painter.setBrush(QColor(color))
+            painter.drawPolygon(QPolygon([
+                QPoint(cx - 4, cy - 2), QPoint(cx + 4, cy - 2), QPoint(cx, cy + 3),
+            ]))
         painter.restore()
 
 
@@ -2592,6 +2624,7 @@ class MainWindow(QMainWindow):
         self._resize_press_global: QPoint | None = None
         self._resize_geometry: QRect | None = None
         self._edge_cursor: Qt.CursorShape | None = None
+        self._menu_close_gate = 0.0  # arrow-click toggle: ignore clicks right after close
 
         self._build_ui()
         self._build_menu()
@@ -2611,6 +2644,8 @@ class MainWindow(QMainWindow):
                 width = int(self._settings.value(f"col_width_{column}", default))
             except (TypeError, ValueError):
                 width = default
+            if column == 5 and width == _OLD_ACTIONS_WIDTH:
+                width = default  # saved under the old two-button layout
             if width > 0:
                 self._tree.setColumnWidth(column, width)
             self._user_col_widths[column] = self._tree.columnWidth(column)
@@ -2715,6 +2750,8 @@ class MainWindow(QMainWindow):
             self._tree.setColumnWidth(column, width)
         self._tree.header().setStretchLastSection(False)
         self._tree.header().setMinimumSectionSize(48)
+        # Actions column is fixed: its width serves the painted buttons, not the user.
+        self._tree.header().setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)
         # Every width is the user's choice (persisted live); Target pak(s)
         # only flexes when forced, keeping the Inject column pinned visible.
         self._tree.header().sectionResized.connect(self._on_col_resized)
@@ -4007,10 +4044,10 @@ class MainWindow(QMainWindow):
             # Combined tooltip on the Actions cell, shown by Qt's native
             # item-tooltip machinery (per-button QToolTip calls flickered).
             tips = state.get("tips") or ("", "")
-            item.setToolTip(
-                5,
-                f"Install / Remove: {tips[0]}\nPak inject / Revert: {tips[1]}",
-            )
+            tip = f"Install / Remove / Revert: {tips[0]}"
+            if tips[1]:
+                tip += f"\nArrow menu: {tips[1]}"
+            item.setToolTip(5, tip)
         self._tree.viewport().update()
 
     def _action_state(self, name: str, busy: bool) -> dict:
@@ -4026,19 +4063,23 @@ class MainWindow(QMainWindow):
         injected = name in self._inject_state
         installed = self._is_installed(name)
         allowed = self._inject_allowed(name)
-        # Left button = Install/Remove (loose), right button = Pak inject/Revert.
-        if installed:
+        busy_tip = "Blocked while another task is running"
+        if injected:
+            # Injection owns this mod: the button itself reverts; no menu.
+            primary = ("Revert", not busy)
+            primary_tip = (
+                "Restores this mod's pre-injection bytes from the managed backups"
+            )
+            menu, menu_tip = ("", False), ""
+        elif installed:
+            # Loose install owns this mod: remove it; no menu (mutually exclusive).
             primary = ("Remove", not busy)
             primary_tip = "Deletes this mod's folder from GAMEDATA\\MODS"
+            menu, menu_tip = ("", False), ""
         else:
-            primary = ("Install", not busy and allowed and not injected)
-            if injected:
-                primary_tip = (
-                    "Blocked: this mod is injected into the paks - "
-                    "revert that first to avoid double-applying"
-                )
-            elif busy:
-                primary_tip = "Blocked while another task is running"
+            primary = ("Install", not busy and allowed)
+            if busy:
+                primary_tip = busy_tip
             elif not allowed:
                 primary_tip = "Blocked: verification has outdated/error files"
             else:
@@ -4046,31 +4087,20 @@ class MainWindow(QMainWindow):
                     "Copies this mod's files into GAMEDATA\\MODS "
                     "(the game's loose-mod loader)"
                 )
-        if injected:
-            secondary = ("Revert", not busy)
-            secondary_tip = (
-                "Restores this mod's pre-injection bytes from the managed backups"
-            )
-        else:
-            secondary = ("Pak inject", not busy and allowed and not installed)
-            if installed:
-                secondary_tip = (
-                    "Blocked: this mod is installed in GAMEDATA\\MODS - "
-                    "remove that install first to avoid double-applying"
-                )
-            elif busy:
-                secondary_tip = "Blocked while another task is running"
+            menu = ("Pak inject", not busy and allowed)
+            if busy:
+                menu_tip = busy_tip
             elif not allowed:
-                secondary_tip = "Blocked: verification has outdated/error files"
+                menu_tip = "Blocked: verification has outdated/error files"
             else:
-                secondary_tip = (
+                menu_tip = (
                     "Bakes this mod's files into the vanilla paks "
                     "(requires verification without blocking issues)"
                 )
         return {
             "primary": primary,
-            "secondary": secondary,
-            "tips": (primary_tip, secondary_tip),
+            "menu": menu,
+            "tips": (primary_tip, menu_tip),
         }
 
     def _inject_allowed(self, mod_name: str) -> bool:
@@ -4090,12 +4120,45 @@ class MainWindow(QMainWindow):
 
     # --- inject / revert --------------------------------------------------------
 
-    def _on_row_action(self, mod_name: str, which: str) -> None:
-        """Delegate-painted Actions column clicked (left = install, right = inject)."""
+    def _on_row_action(self, mod_name: str, which: str, index) -> None:
+        """Delegate-painted Actions column clicked (main button, or arrow menu)."""
         if which == "primary":
-            self._on_install_button(mod_name)
-        else:
-            self._on_inject_button(mod_name)
+            if mod_name in self._inject_state:
+                self._on_inject_button(mod_name)  # button reads "Revert"
+            else:
+                self._on_install_button(mod_name)
+            return
+        if time.monotonic() < self._menu_close_gate:
+            return  # this click just closed the menu - toggle, don't reopen
+        label, enabled = self._action_state(mod_name, self._worker is not None)["menu"]
+        if not label or not enabled:
+            return  # no menu for installed/injected mods or blocked states
+        menu = QMenu(self)
+        menu.setWindowFlags(
+            Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.NoDropShadowWindowHint
+        )
+        menu.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        menu.setStyleSheet(
+            f"QMenu {{ background: {theme.BG_PANEL}; border: 1px solid {theme.BORDER};"
+            "  padding: 2px 0; border-radius: 0; }"
+            "QMenu::item { background: transparent; color: #e8e6ee;"
+            "  padding: 5px 12px 5px 10px; border-radius: 0; }"
+            "QMenu::item:selected { background: #242030; color: #ffffff; }"
+        )
+        action = menu.addAction(label)
+        action.triggered.connect(lambda checked=False, n=mod_name: self._on_inject_button(n))
+        # Drop straight down from the button, exactly the button's width - inline.
+        rect = self._tree.visualRect(index)
+        width = self._tree.columnWidth(5) - 10  # cell minus the delegate's margins
+        menu.setFixedWidth(max(width, 90))
+        origin = self._tree.viewport().mapToGlobal(
+            QPoint(rect.left() + 5, rect.bottom() + 1)
+        )
+        menu.exec(origin)
+        # The click that dismissed the popup still reaches the delegate's release
+        # handler - gate the next arrow click so it toggles instead of reopening.
+        self._menu_close_gate = time.monotonic() + 0.35
 
     def _nms_running(self) -> bool:
         """True if No Man's Sky is running (pak swaps fail while it holds the files)."""

@@ -24,12 +24,10 @@ class _TooltipDelayStyle(QProxyStyle):
 
 
 def _lock_dir() -> Path:
-    directory = repo.project_root()
     try:
-        directory.mkdir(parents=True, exist_ok=True)
+        return repo.state_dir()
     except OSError:
-        directory = Path.home()
-    return directory
+        return Path.home()
 
 
 def main() -> None:
@@ -65,7 +63,7 @@ def main() -> None:
             print(f"SELFTEST: verification={'done' if fields_done else 'pending'}")
             if window._verify_counts:
                 print(f"SELFTEST: counts={window._verify_counts}")
-            shot = repo.project_root() / "ui_selftest.png"
+            shot = repo.state_dir() / "ui_selftest.png"
             window.grab().save(str(shot))
             print(f"SELFTEST: screenshot saved to {shot.name}")
             sys.exit(0 if window._index is not None and mods > 0 else 1)

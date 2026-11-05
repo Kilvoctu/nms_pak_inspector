@@ -13,27 +13,34 @@ def project_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
+def state_dir() -> Path:
+    """Folder for all runtime state (gitignored; created on demand)."""
+    directory = project_root() / "state"
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory
+
+
 def app_icon_file() -> Path:
-    """The app icon: extracted bundle dir when frozen (onefile), else the project root."""
+    """The app icon: extracted bundle dir when frozen (onefile), else assets/."""
     meipass = getattr(sys, "_MEIPASS", None)
     if meipass and (Path(meipass) / "icon.ico").exists():
         return Path(meipass) / "icon.ico"
-    return project_root() / "icon.ico"
+    return project_root() / "assets" / "icon.ico"
 
 
 def state_file() -> Path:
     """GUI/settings file (QSettings INI)."""
-    return project_root() / "state.ini"
+    return state_dir() / "state.ini"
 
 
 def index_file() -> Path:
     """Static path->pak index built by index_paks."""
-    return project_root() / "pak_index.json"
+    return state_dir() / "pak_index.json"
 
 
 def cache_dir() -> Path:
     """Cache root (decompiled vanilla MXMLs etc.)."""
-    return project_root() / ".cache"
+    return state_dir() / "cache"
 
 
 def vanilla_cache_dir() -> Path:
@@ -43,7 +50,7 @@ def vanilla_cache_dir() -> Path:
 
 def mbincompilers_dir() -> Path:
     """Managed folder for downloaded MBINCompiler exes."""
-    return project_root() / "mbincompilers"
+    return state_dir() / "mbincompilers"
 
 
 def mods_dir() -> Path:
@@ -51,14 +58,19 @@ def mods_dir() -> Path:
     return project_root() / "mods"
 
 
+def verify_overrides_file() -> Path:
+    """User's saved verify overrides (FORMAT/no-effect decisions)."""
+    return state_dir() / "verify_overrides.json"
+
+
 def inject_state_file() -> Path:
     """Persisted injection state: which mods are baked into the paks."""
-    return project_root() / "inject_state.json"
+    return state_dir() / "inject_state.json"
 
 
 def inject_backup_dir() -> Path:
     """Pre-injection snapshots - the only copy of vanilla bytes after a pak is modified."""
-    return project_root() / "inject_backups"
+    return state_dir() / "inject_backups"
 
 
 GAME_PACKAGE = "HelloGames.NoMansSky"

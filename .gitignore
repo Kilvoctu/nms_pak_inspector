@@ -10,16 +10,7 @@ mods/
 *.md
 !README.md
 
-# runtime state & caches (machine-specific, rebuilt by the app)
-state.ini
-pak_index.json
-inject_state.json
-loose_state.json
-loose_picks.json
-verify_overrides.json
-inject_backups/
-.cache/
-mbincompilers/
-nms_pak_inspector.lock
-nms_pak_injector.lock
+# runtime state (machine-specific, rebuilt by the app) - one folder
+state/
+mods/
 ui_selftest.png

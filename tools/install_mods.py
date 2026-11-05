@@ -14,7 +14,7 @@ from .merge_mods import MergeError
 from .verify_mods import _extract_and_decompile, _parse_mod_tree, _read_mod_data
 
 MANAGED_FOLDER = "nmspi-managed"
-STATE_FILE = repo.project_root() / "loose_state.json"
+STATE_FILE = repo.state_dir() / "loose_state.json"
 WORK_ROOT = repo.cache_dir() / "_loosework"
 BUILD_CACHE = repo.cache_dir() / "loose_built.json"
 BUILD_VERSION = 1  # bump to force a full regenerate after pipeline changes
@@ -43,7 +43,7 @@ def _load_build_cache() -> dict:
     return {}
 
 
-PICKS_FILE = repo.project_root() / "loose_picks.json"
+PICKS_FILE = repo.state_dir() / "loose_picks.json"
 
 
 def _load_picks() -> dict:
