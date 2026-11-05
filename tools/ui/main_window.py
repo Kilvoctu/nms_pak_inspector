@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import time
 import xml.etree.ElementTree as ET
+from collections.abc import Callable
 from pathlib import Path
 
 from PySide6.QtCore import (
@@ -97,6 +98,7 @@ from ..conflicts import (
 )
 from . import theme
 from .pak_inspector import PakInspectorDialog
+from .search_toggles import SearchToggles
 from .worker import (
     FileHit,
     ModScan,
@@ -865,6 +867,8 @@ class _CompareTrees(QWidget):
         self._search = QLineEdit(self)
         self._search.setPlaceholderText("Search field name…")
         self._search.textChanged.connect(lambda _t: self.rebuild())
+        self._search_toggles = SearchToggles(self._search)
+        self._search_toggles.changed.connect(self.rebuild)
         top.addWidget(self._search, 1)
         self._changed_only = QCheckBox("Changed only", self)
         # Persisted globally (shared with the merge dialog's preview filter).
@@ -925,7 +929,9 @@ class _CompareTrees(QWidget):
         self.rebuild()
 
     def rebuild(self) -> None:
-        needle = self._search.text().strip().lower()
+        _ok, match = self._search_toggles.matcher(self._search.text())
+        if not self._search.text().strip():
+            match = None  # no query: unfiltered browse (preserves pair-linking mode)
         changed_only = self._changed_only.isChecked()
         self._building = True
         try:
@@ -938,7 +944,7 @@ class _CompareTrees(QWidget):
             van_props = list(self._van_root.findall("Property"))
             left_items, right_items = self._fill_mod(
                 list(self._mod_root.findall("Property")), van_props,
-                needle, changed_only,
+                match, changed_only,
             )
             for item in left_items:
                 self._left.invisibleRootItem().addChild(item)
@@ -947,14 +953,14 @@ class _CompareTrees(QWidget):
                     self._right.invisibleRootItem().addChild(item)
             else:
                 # Full vanilla tree for browsing (linked to paired mod nodes).
-                for item in self._fill_van(van_props, needle):
+                for item in self._fill_van(van_props, match):
                     self._right.invisibleRootItem().addChild(item)
             self._left.expandAll()
             self._right.expandAll()
         finally:
             self._building = False
 
-    def _fill_mod(self, mod_props, van_props, needle: str,
+    def _fill_mod(self, mod_props, van_props, match: Callable | None,
                   changed_only: bool) -> tuple[list, list]:
         """Build the left (mod) tree items; filtered mode also returns vanilla mirrors."""
         van_by_id: dict[tuple[str | None, str], object] = {}
@@ -991,7 +997,7 @@ class _CompareTrees(QWidget):
             child_left, child_right = ([], [])
             if children:
                 child_left, child_right = self._fill_mod(
-                    children, van_children, needle, changed_only
+                    children, van_children, match, changed_only
                 )
             changed = (
                 mremove or inserted
@@ -1003,7 +1009,7 @@ class _CompareTrees(QWidget):
             )
             if changed_only and not changed:
                 continue
-            if needle and not self._matches(name, value, needle) and not child_left:
+            if match and not self._matches(name, value, match) and not child_left:
                 continue
             ltext = f"{name} = {value}" if value is not None and not children else name
             if mremove:
@@ -1030,7 +1036,7 @@ class _CompareTrees(QWidget):
                 litem.setForeground(0, COLOR_CLEAN)
             elif changed:
                 litem.setForeground(0, COLOR_MERGE)
-            if needle and self._matches(name, value, needle):
+            if match and self._matches(name, value, match):
                 litem.setBackground(0, QColor(255, 154, 60, 60))
             if self._editable and not children and vp is not None and not mremove:
                 litem.setFlags(litem.flags() | Qt.ItemFlag.ItemIsEditable)
@@ -1055,20 +1061,18 @@ class _CompareTrees(QWidget):
         return left_out, right_out
 
     @staticmethod
-    def _matches(name: str, value, needle: str) -> bool:
-        if needle in name.lower():
-            return True
-        return value is not None and needle in str(value).lower()
+    def _matches(name: str, value, match: Callable[[str], bool]) -> bool:
+        return match(name) or (value is not None and match(str(value)))
 
-    def _fill_van(self, van_props, needle: str) -> list[QTreeWidgetItem]:
+    def _fill_van(self, van_props, match: Callable | None) -> list[QTreeWidgetItem]:
         """Right tree: the complete vanilla file; mod-touched leaves get highlight colors."""
         right_out: list[QTreeWidgetItem] = []
         for vp in van_props:
             name = vp.get("name") or "?"
             children = list(vp.findall("Property"))
             value = vp.get("value")
-            child_items = self._fill_van(children, needle) if children else []
-            if needle and not self._matches(name, value, needle) and not child_items:
+            child_items = self._fill_van(children, match) if children else []
+            if match and not self._matches(name, value, match) and not child_items:
                 continue
             rtext = f"{name} = {value}" if value is not None and not children else name
             ritem = QTreeWidgetItem([rtext])
@@ -2040,6 +2044,8 @@ class _FieldDialog(QDialog):
         self._field_search.setPlaceholderText("Filter fields…")
         self._field_search.setClearButtonEnabled(True)
         self._field_search.textChanged.connect(self._on_field_filter_changed)
+        self._field_toggles = SearchToggles(self._field_search)
+        self._field_toggles.changed.connect(lambda: self._on_field_filter_changed(""))
         filter_row.addWidget(self._field_search, 1)
         self._changed_only = QCheckBox("Changed only", fields_page)
         self._changed_only.setChecked(
@@ -2141,16 +2147,15 @@ class _FieldDialog(QDialog):
         rows = self._all_rows
         if self._changed_only.isChecked():
             rows = [r for r in rows if r.verdict != verify_mods.V_SAME]
-        needle = self._field_search.text().strip().lower()
-        if needle:
-            rows = [
-                r for r in rows
-                if needle in _pretty_path(r.path).lower()
-                or needle in (r.mod_value or "").lower()
-                or needle in (r.vanilla_value or "").lower()
-                or needle in r.verdict.lower()
-                or needle in (r.note or "").lower()
-            ]
+        _ok, match = self._field_toggles.matcher(self._field_search.text())
+        rows = [
+            r for r in rows
+            if match(_pretty_path(r.path))
+            or match(r.mod_value or "")
+            or match(r.vanilla_value or "")
+            or match(r.verdict)
+            or match(r.note or "")
+        ]
         return rows
 
     def _fill_table(self, table: QTableWidget, rows: list) -> None:

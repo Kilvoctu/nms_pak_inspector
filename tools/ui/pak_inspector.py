@@ -3,6 +3,7 @@
 import json
 import threading
 import xml.etree.ElementTree as ET
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -29,6 +30,7 @@ from PySide6.QtWidgets import (
 
 from .. import archivelib, mbincompiler, merge_mods, paklib, repo
 from ..verify_mods import _extract_and_decompile, _parse_mod_tree, _read_mod_data
+from .search_toggles import SearchToggles, build_matcher
 
 _ROLE = Qt.ItemDataRole.UserRole  # main tree: ("pak",..)/("dir",..)/("file",..)
 _ELEM_ROLE = Qt.ItemDataRole.UserRole  # preview tree: the row's ET element
@@ -72,6 +74,9 @@ class PakInspectorDialog(QDialog):
         self._pak_filter = QLineEdit(self)
         self._pak_filter.setPlaceholderText("filter pak list (e.g. globals, EntityScene)")
         self._pak_filter.textChanged.connect(self._on_pak_filter)
+        self._pak_toggles = SearchToggles(self._pak_filter, regex=False)
+        self._pak_toggles.changed.connect(
+            lambda: self._on_pak_filter(self._pak_filter.text()))
         prow.addWidget(self._pak_filter, 1)
         layout.addLayout(prow)
 
@@ -82,6 +87,8 @@ class PakInspectorDialog(QDialog):
             "search entry paths in the filtered paks - leave empty to browse the tree"
         )
         self._search.textChanged.connect(self._on_search_changed)
+        self._search_toggles = SearchToggles(self._search)
+        self._search_toggles.changed.connect(lambda: self._on_search_changed(""))
         srow.addWidget(self._search, 1)
         self._deep_check = QCheckBox("Deep search", self)
         self._deep_check.setToolTip(
@@ -125,6 +132,9 @@ class PakInspectorDialog(QDialog):
         self._preview_filter = QLineEdit(self)
         self._preview_filter.setPlaceholderText("filter fields in preview")
         self._preview_filter.textChanged.connect(self._apply_preview_filter)
+        self._preview_toggles = SearchToggles(self._preview_filter)
+        self._preview_toggles.changed.connect(
+            lambda: self._apply_preview_filter(self._preview_filter.text()))
         pf_row.addWidget(self._preview_filter, 1)
         pv_layout.addLayout(pf_row)
         self._preview_tree = QTreeWidget(self)
@@ -196,9 +206,9 @@ class PakInspectorDialog(QDialog):
         return self._index["paks"][pak]["files"]
 
     def _filtered_paks(self) -> list[str]:
-        text = self._pak_filter.text().strip().lower()
+        _ok, match = self._pak_toggles.matcher(self._pak_filter.text())
         paks = sorted(self._index["paks"], key=str.lower)
-        return [p for p in paks if not text or text in p.lower()]
+        return [p for p in paks if match(p)]
 
     def _fill_mods(self) -> None:
         """Writable mods only (rar archives cannot be written)."""
@@ -322,17 +332,17 @@ class PakInspectorDialog(QDialog):
         self._search_timer.start()
 
     def _run_search(self, text: str) -> None:
-        text = text.strip().lower()
         self._stop_deep()
         self._tree.clear()
-        if not text:
+        ok, match = self._search_toggles.matcher(text)
+        if not text.strip() or not ok:
             self._populate_roots()
             self._update_status()
             return
         matches, total = [], 0
         for pak in self._filtered_paks():
             for stored in self._pak_files(pak):
-                if text in stored.lower():
+                if match(stored):
                     total += 1
                     if len(matches) < _RESULT_CAP:
                         matches.append((stored.replace("\\", "/"), pak))
@@ -379,7 +389,10 @@ class PakInspectorDialog(QDialog):
         gen = self._deep_gen
         stop = self._deep_stop
         thread = threading.Thread(
-            target=self._deep_job, args=(text, paks, stop, gen), daemon=True
+            target=self._deep_job,
+            args=(text, paks, stop, gen,
+                  self._search_toggles.case_on, self._search_toggles.regex_on),
+            daemon=True,
         )
         thread.start()
 
@@ -475,17 +488,18 @@ class PakInspectorDialog(QDialog):
         return tidx
 
     def _deep_job(self, text: str, paks: list[str], stop: threading.Event,
-                  gen: int) -> None:
+                  gen: int, case_on: bool, regex_on: bool) -> None:
         tidx = self._ensure_template_index(paks, stop, gen)
         if tidx is None:
             return
-        needle = text.strip().lower()
-        if not needle:
+        ok, match = build_matcher(text, case_on, regex_on)
+        if not text.strip() or not ok:
+            self._deep_finished.emit(gen, 0, 0)
             return
         matched: dict[str, tuple[str, str]] = {}
         for hh, t in tidx["templates"].items():
-            hit_fields = [f for f in t["fields"] if needle in f.lower()]
-            if needle in t["name"].lower():
+            hit_fields = [f for f in t["fields"] if match(f)]
+            if match(t["name"]):
                 matched[hh] = (t["name"], f"template {t['name']} matches")
             elif hit_fields:
                 show = ", ".join(hit_fields[:3])
@@ -525,18 +539,16 @@ class PakInspectorDialog(QDialog):
 
     def _apply_preview_filter(self, text: str) -> None:
         """Hide preview rows that don't match (ancestors of matches stay visible)."""
-        text = text.strip().lower()
+        _ok, match = self._preview_toggles.matcher(text)
         top = self._preview_tree.topLevelItem(0)
         if top is not None:
-            self._filter_row(top, text)
+            self._filter_row(top, match)
 
-    def _filter_row(self, item: QTreeWidgetItem, text: str) -> bool:
+    def _filter_row(self, item: QTreeWidgetItem, match: Callable[[str], bool]) -> bool:
         """Return True if this row or any descendant matches; set visibility."""
-        self_match = (not text
-                      or text in item.text(0).lower()
-                      or text in item.text(1).lower())
+        self_match = match(item.text(0)) or match(item.text(1))
         # no any() short-circuit: every child must be visited to clear its state
-        results = [self._filter_row(item.child(i), text)
+        results = [self._filter_row(item.child(i), match)
                    for i in range(item.childCount())]
         child_visible = any(results)
         item.setHidden(not (self_match or child_visible))
