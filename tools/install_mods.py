@@ -164,14 +164,17 @@ def install_mod(mod, scan: dict, index: dict, pcbanks: str, log) -> dict:
         )
     state = _load_state()
     order = max((e.get("order", 0) for e in state.values()), default=0) + 1
-    paths = [_loose_path(hit)[0] for hit in sorted(mod.game_files, key=lambda h: h.entry)]
+    hits = sorted(mod.game_files, key=lambda h: h.entry)
+    paths = [_loose_path(h)[0] for h in hits]
     state[mod.name] = {"order": order, "files": paths}
     _save_state(state)
     result = rebuild(scan, index, pcbanks, log)
     log(f"Installed {mod.name}: {len(paths)} file(s) -> {MANAGED_FOLDER}")
-    rootless = [p for p in paths if "/" not in p]
+    # Bare-stored pak entries legitimately land at GAMEDATA root and load;
+    # only new files with no folder have nothing to match and never load.
+    rootless = [_loose_path(h)[0] for h in hits if h.pak is None]
+    rootless = [p for p in rootless if "/" not in p]
     if rootless:
-        # No vanilla file lives at GAMEDATA root, so these targets never load.
         log(
             f"WARNING: {len(rootless)} file(s) ship without a directory prefix and "
             "won't load loose (likely a mod packaging issue):"
@@ -197,10 +200,11 @@ def uninstall_mod(mod_name: str, scan: dict, index: dict, pcbanks: str, log) -> 
 
 
 def _loose_path(hit) -> tuple[str, bool]:
-    """Loose target path (GAMEDATA-relative, '/'-separated) + whether content is a tree.
-    Always built from the mod's own rel path (stored names can be bare); EXML/MXML -> .MBIN."""
-    rel = hit.rel.replace("\\", "/")
-    is_tree = rel.lower().endswith(TREE_SUFFIXES)
+    """Loose target (GAMEDATA-relative, '/') + tree flag. Pak-backed: the pak's
+    stored name verbatim (the loader matches exact stored paths; bare stays bare)."""
+    is_tree = hit.rel.lower().endswith(TREE_SUFFIXES)
+    rel = hit.stored if getattr(hit, "pak", None) and hit.stored else hit.rel
+    rel = rel.replace("\\", "/")
     if rel.lower().endswith((".exml", ".mxml")):
         rel = rel[:-5] + ".MBIN"
     return rel, is_tree
