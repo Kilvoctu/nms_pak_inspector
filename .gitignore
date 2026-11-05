@@ -15,6 +15,7 @@ state.ini
 pak_index.json
 inject_state.json
 loose_state.json
+loose_picks.json
 verify_overrides.json
 inject_backups/
 .cache/

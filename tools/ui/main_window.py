@@ -1696,6 +1696,53 @@ class _NexusUpdatesDialog(QDialog):
             QDesktopServices.openUrl(QUrl(nexus.page_url(mod_id)))
 
 
+class _RawConflictsDialog(QDialog):
+    """Pick a winner per raw file that several loose mods ship with differing bytes."""
+
+    def __init__(self, conflicts: list, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Raw file conflicts")
+        layout = QVBoxLayout(self)
+        intro = QLabel(
+            "These files cannot be merged (not property trees) - each is "
+            "shipped by several loose mods with different bytes. Pick which "
+            "mod's copy wins; your choice is remembered.", self)
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+        self._combos: dict[str, QComboBox] = {}
+        for c in conflicts:
+            label = QLabel(f"{c['target']}", self)
+            label.setWordWrap(True)
+            label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            layout.addWidget(label)
+            combo = QComboBox(self)
+            for contrib in c["contributors"]:
+                size = f"{contrib['size']:,} B" if contrib["size"] else "?"
+                combo.addItem(
+                    f"{contrib['name']}  ({size}, install order {contrib['order']})",
+                    userData=contrib["name"],
+                )
+            if c.get("pick"):
+                idx = combo.findData(c["pick"])
+                if idx >= 0:
+                    combo.setCurrentIndex(idx)
+            self._combos[c["key"]] = combo
+            layout.addWidget(combo)
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        cancel = QPushButton("Cancel install")
+        cancel.clicked.connect(self.reject)
+        buttons.addWidget(cancel)
+        ok = QPushButton("Save picks and install")
+        ok.clicked.connect(self.accept)
+        ok.setDefault(True)
+        buttons.addWidget(ok)
+        layout.addLayout(buttons)
+
+    def picks(self) -> dict:
+        return {key: combo.currentData() for key, combo in self._combos.items()}
+
+
 class _MergeDialog(QDialog):
     """Resolve cross-mod conflicts for a group injection and preview the merged result before writing."""
 
@@ -4276,10 +4323,33 @@ class MainWindow(QMainWindow):
                 self._current_pcbanks(), on_done=self._on_install_done,
             )
         else:
+            mod = next((m for m in self._scan["mods"] if m.name == mod_name), None)
+            conflicts = install_mods.detect_raw_conflicts(
+                self._scan, pending_mod=mod
+            )
+            unresolved = [c for c in conflicts if not c["pick"]]
+            if unresolved and not self._resolve_raw_conflicts(unresolved):
+                self._installing_mod = None
+                self._refresh_actions()
+                self.append_log("Install cancelled (raw file conflicts)")
+                return
             self._start_task(
                 install_mod_worker, mod_name, self._scan, self._index,
                 self._current_pcbanks(), on_done=self._on_install_done,
             )
+
+    def _resolve_raw_conflicts(self, conflicts: list) -> bool:
+        """Pick a winner per raw-file conflict; picks persist. True on OK."""
+        dlg = _RawConflictsDialog(conflicts, self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return False
+        picks = dlg.picks()
+        if picks:
+            install_mods.set_raw_picks(picks)
+            self.append_log(
+                f"Raw conflict picks saved for {len(picks)} file(s)"
+            )
+        return True
 
     def _on_install_done(self, result: dict) -> None:
         self._installing_mod = None

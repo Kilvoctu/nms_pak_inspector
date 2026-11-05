@@ -43,6 +43,29 @@ def _load_build_cache() -> dict:
     return {}
 
 
+PICKS_FILE = repo.project_root() / "loose_picks.json"
+
+
+def _load_picks() -> dict:
+    """Saved winners for raw-file conflicts: lowered target path -> mod name."""
+    if PICKS_FILE.exists():
+        try:
+            return json.loads(PICKS_FILE.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+    return {}
+
+
+def set_raw_picks(picks: dict) -> None:
+    """Persist the user's raw-conflict winners (target -> mod name)."""
+    stored = _load_picks()
+    stored.update(picks)
+    if stored:
+        PICKS_FILE.write_text(json.dumps(stored, indent=2), encoding="utf-8")
+    else:
+        PICKS_FILE.unlink(missing_ok=True)
+
+
 def _save_build_cache(cache: dict) -> None:
     if cache:
         BUILD_CACHE.write_text(json.dumps(cache), encoding="utf-8")
@@ -183,6 +206,62 @@ def _loose_path(hit) -> tuple[str, bool]:
     return rel, is_tree
 
 
+def _group_targets(state: dict, mods: dict) -> dict:
+    """Contributions grouped by lowered loose target: [(order, name, hit, rel, is_tree)]."""
+    groups: dict[str, list] = {}
+    for name, entry in state.items():
+        mod = mods.get(name)
+        if mod is None:
+            continue
+        for hit in sorted(mod.game_files, key=lambda h: h.entry):
+            rel, is_tree = _loose_path(hit)
+            groups.setdefault(rel.lower(), []).append(
+                (entry.get("order", 0), name, hit, rel, is_tree)
+            )
+    return groups
+
+
+def detect_raw_conflicts(scan: dict, pending_mod=None) -> list[dict]:
+    """Raw-file targets shipped by several installed mods with differing bytes.
+    Cheap (headers only); ``pending_mod`` simulates as installed; picks included."""
+    state = _load_state()
+    mods = {m.name: m for m in scan["mods"]}
+    if pending_mod is not None and pending_mod.name not in state:
+        state = dict(state)
+        order = max((e.get("order", 0) for e in state.values()), default=0) + 1
+        state[pending_mod.name] = {
+            "order": order,
+            "files": [_loose_path(h)[0] for h in pending_mod.game_files],
+        }
+    groups = _group_targets(state, mods)
+    stamps = _source_stamps(mods)
+    picks = _load_picks()
+    conflicts: list[dict] = []
+    for key, parts in groups.items():
+        parts.sort()
+        if parts[0][4] or len(parts) < 2:
+            continue
+        contributors, fps = [], set()
+        for order, name, hit, _rel, _t in parts:
+            stamp = stamps.get(name, {}).get(hit.entry)
+            contributors.append({
+                "order": order,
+                "name": name,
+                "size": stamp[0] if stamp else None,
+                "crc": stamp[1] if stamp else None,
+            })
+            fps.add((stamp[0], stamp[1]) if stamp else None)
+        if len(fps) <= 1:
+            continue  # identical bytes: nothing to decide
+        conflicts.append({
+            "key": key,
+            "target": parts[0][3],
+            "contributors": contributors,
+            "pick": picks.get(key),
+        })
+    return conflicts
+
+
 def rebuild(scan: dict, index: dict, pcbanks: str, log) -> dict:
     """Regenerate the managed folder from the manifest (built aside, then swapped in).
     Unchanged targets are copied over; changed ones generate in parallel; shared paths merge."""
@@ -204,15 +283,35 @@ def rebuild(scan: dict, index: dict, pcbanks: str, log) -> dict:
     WORK_ROOT.mkdir(parents=True, exist_ok=True)
     compiler = mbincompiler.ensure_compiler()
 
-    groups: dict[str, list] = {}
-    for name, entry in state.items():
-        mod = mods[name]
-        for hit in sorted(mod.game_files, key=lambda h: h.entry):
-            rel, is_tree = _loose_path(hit)
-            key = rel.lower()
-            groups.setdefault(key, []).append((entry.get("order", 0), name, hit, rel, is_tree))
-
+    groups = _group_targets(state, mods)
     stamps = _source_stamps(mods)
+
+    # Raw (non-tree) groups: identical bytes collapse to one contributor;
+    # differing bytes need a pick - all conflicts reported together, up front.
+    picks = _load_picks()
+    unresolved: list[str] = []
+    for key in sorted(groups):
+        parts = groups[key]
+        if parts[0][4] or len(parts) < 2:
+            continue
+        parts.sort()
+        fps = {tuple(stamps.get(name, {}).get(hit.entry) or ()) for _o, name, hit, _r, _t in parts}
+        if len(fps) <= 1:
+            groups[key] = [parts[0]]  # identical bytes: nothing to decide
+            continue
+        chosen = [p for p in parts if p[1] == picks.get(key)]
+        if chosen:
+            groups[key] = chosen
+            log(f"raw conflict {parts[0][3]}: using {chosen[0][1]} (saved pick)")
+        else:
+            names = ", ".join(p[1] for p in parts)
+            unresolved.append(f"{parts[0][3]}  (shipped by: {names})")
+    if unresolved:
+        raise MergeError(
+            "raw file(s) shipped by several loose mods with differing bytes - "
+            "pick a winner for each:\n  " + "\n  ".join(unresolved)
+        )
+
     cache = _load_build_cache()
     managed = managed_dir(pcbanks)
     building = managed.parent / f"{MANAGED_FOLDER}.building"
