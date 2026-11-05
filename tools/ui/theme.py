@@ -31,6 +31,13 @@ COLOR_DIM = QColor(DIM)
 
 FONT_FAMILIES = ["Bahnschrift", "Segoe UI"]  # DIN-like geometric, Windows built-in
 
+# --- layout metrics: one scale across every dialog, panel, and row ---------------
+
+MARGIN_WINDOW = 11     # outer padding of dialogs and the main window (= Fusion def)
+MARGIN_TAB = 8         # content inset inside tab pages
+SPACING_ROW = 6        # gap between sibling widgets in a row (= Fusion default)
+SPACING_SECTIONS = 8   # vertical rhythm between sections in a dialog
+
 
 def app_font() -> QFont:
     """The theme font: Bahnschrift (DIN-like) with a Segoe UI fallback."""

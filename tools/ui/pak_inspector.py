@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
 
 from .. import archivelib, mbincompiler, merge_mods, paklib, repo
 from ..verify_mods import _extract_and_decompile, _parse_mod_tree, _read_mod_data
+from . import theme
 from .search_toggles import SearchToggles, build_matcher
 
 _ROLE = Qt.ItemDataRole.UserRole  # main tree: ("pak",..)/("dir",..)/("file",..)
@@ -69,7 +70,11 @@ class PakInspectorDialog(QDialog):
         self._build_coverage()
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(theme.MARGIN_WINDOW, theme.MARGIN_WINDOW,
+                                  theme.MARGIN_WINDOW, theme.MARGIN_WINDOW)
+        layout.setSpacing(theme.SPACING_SECTIONS)
         prow = QHBoxLayout()
+        prow.setSpacing(theme.SPACING_ROW)
         prow.addWidget(QLabel("Paks:", self))
         self._pak_filter = QLineEdit(self)
         self._pak_filter.setPlaceholderText("filter pak list (e.g. globals, EntityScene)")
@@ -81,6 +86,7 @@ class PakInspectorDialog(QDialog):
         layout.addLayout(prow)
 
         srow = QHBoxLayout()
+        srow.setSpacing(theme.SPACING_ROW)
         srow.addWidget(QLabel("Find:", self))
         self._search = QLineEdit(self)
         self._search.setPlaceholderText(

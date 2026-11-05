@@ -14,12 +14,13 @@ Simple tool that can inspect, edit, and install No Man's Sky mods. This app is b
 4. Run `NMSPakInspector.exe`.
 5. Optional: click `Check for compiler updates` in the menu (it downloads MBINCompiler when a newer release is available).
 6. Point the app at your game folder and your mods folder; on first launch it builds a pak index (takes a moment).
-7. Poke around and figure out the rest.
+7. Poke around and figure out the rest (start with `Inspect paks` in the ☰ menu).
 
 
 ## Features
 - Lists mods from your mod folder; drag and drop archives (.zip/.7z/.rar) or folders onto the window to add them.
 - Checks mod files against No Man's Sky's pak data without touching the game files; shows what's broken, outdated, ineffectual, etc.
+- Pak inspector to browse/search paks, instant field-name deep search, DDS previews, pull files or fields into a mod.
 - Per mod inline editor with side-by-side tree comparison; diff highlighting, preview, format auto-fix, raw-asset inspector.
 - Ability to merge or resolve conflicts when multiple mods touch the same file.
 - Inject mod data into the game's pak data, only changing what needs to be rewritten,

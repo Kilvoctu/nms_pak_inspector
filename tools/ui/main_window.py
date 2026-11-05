@@ -497,6 +497,9 @@ class _CollisionDialog(QDialog):
         self.setWindowTitle("Collision Detail")
         self.setMinimumWidth(560)
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(theme.MARGIN_WINDOW, theme.MARGIN_WINDOW,
+                                  theme.MARGIN_WINDOW, theme.MARGIN_WINDOW)
+        layout.setSpacing(theme.SPACING_SECTIONS)
         header = QLabel(f"Pak path assigned by {len(entries)} mods:")
         f = header.font()
         f.setBold(True)
@@ -513,7 +516,7 @@ class _CollisionDialog(QDialog):
             sf = shared.font()
             sf.setBold(True)
             shared.setFont(sf)
-            layout.addSpacing(6)
+            layout.addSpacing(theme.SPACING_ROW)
             layout.addWidget(shared)
             for c in conflicts:
                 color = self._KIND_COLOR.get(c.kind, COLOR_DIM)
@@ -540,7 +543,7 @@ class _CollisionDialog(QDialog):
         )
         note.setWordWrap(True)
         note.setForegroundRole(QPalette.ColorRole.WindowText)
-        layout.addSpacing(6)
+        layout.addSpacing(theme.SPACING_ROW)
         layout.addWidget(note)
         close = QPushButton("Close")
         close.clicked.connect(self.accept)
@@ -862,7 +865,9 @@ class _CompareTrees(QWidget):
         self._dups: dict[int, int] = {}  # id(elem) -> duplicate group size
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(theme.MARGIN_TAB, theme.MARGIN_TAB,
+                                  theme.MARGIN_TAB, theme.MARGIN_TAB)
+        layout.setSpacing(theme.SPACING_ROW)
         top = QHBoxLayout()
         self._search = QLineEdit(self)
         self._search.setPlaceholderText("Search field name…")
@@ -1404,8 +1409,9 @@ class _AboutDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("About NMS Pak Inspector")
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(14, 14, 14, 14)
-        layout.setSpacing(10)
+        layout.setContentsMargins(theme.MARGIN_WINDOW, theme.MARGIN_WINDOW,
+                                  theme.MARGIN_WINDOW, theme.MARGIN_WINDOW)
+        layout.setSpacing(theme.SPACING_SECTIONS)
         name_label = QLabel(
             '<span style="font-size:13pt; font-weight:bold;">NMS Pak Inspector</span>',
             self,
@@ -1448,8 +1454,9 @@ class _NexusInfoDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Nexus Info")
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(8)
+        layout.setContentsMargins(theme.MARGIN_WINDOW, theme.MARGIN_WINDOW,
+                                  theme.MARGIN_WINDOW, theme.MARGIN_WINDOW)
+        layout.setSpacing(theme.SPACING_SECTIONS)
 
         parsed = result.get("parsed")
         if parsed is None:
@@ -1562,8 +1569,9 @@ class _NexusKeyDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Nexus API Key")
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(10)
+        layout.setContentsMargins(theme.MARGIN_WINDOW, theme.MARGIN_WINDOW,
+                                  theme.MARGIN_WINDOW, theme.MARGIN_WINDOW)
+        layout.setSpacing(theme.SPACING_SECTIONS)
         info = QLabel(
             "Nexus metadata needs a <b>personal API key</b> (one-time setup):<br>"
             '1. Open <a href="https://www.nexusmods.com/users/myaccount?tab=api+access">'
@@ -1686,6 +1694,9 @@ class _RawConflictsDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Raw File Conflicts")
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(theme.MARGIN_WINDOW, theme.MARGIN_WINDOW,
+                                  theme.MARGIN_WINDOW, theme.MARGIN_WINDOW)
+        layout.setSpacing(theme.SPACING_SECTIONS)
         intro = QLabel(
             "These files cannot be merged (not property trees) - each is "
             "shipped by several loose mods with different bytes. Pick which "
@@ -1742,6 +1753,9 @@ class _MergeDialog(QDialog):
         self.setWindowTitle("Merge Mods for Injection")
         self.setMinimumSize(720, 480)
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(theme.MARGIN_WINDOW, theme.MARGIN_WINDOW,
+                                  theme.MARGIN_WINDOW, theme.MARGIN_WINDOW)
+        layout.setSpacing(theme.SPACING_SECTIONS)
 
         header = QLabel(
             f"{len(names)} mod(s) share {n_files} pak file(s): "
@@ -1898,6 +1912,9 @@ class _RawAssetDialog(QDialog):
         self.setWindowTitle(f"Raw asset — {ver.mod_name}")
         self.setMinimumSize(520, 420)
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(theme.MARGIN_WINDOW, theme.MARGIN_WINDOW,
+                                  theme.MARGIN_WINDOW, theme.MARGIN_WINDOW)
+        layout.setSpacing(theme.SPACING_SECTIONS)
 
         header = QLabel(
             f"{ver.rel}\n{ver.pak} : {ver.stored} — {_FIELDS_LABEL[ver.status]}"
@@ -2016,6 +2033,9 @@ class _FieldDialog(QDialog):
         self._refresh_rows()
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(theme.MARGIN_WINDOW, theme.MARGIN_WINDOW,
+                                  theme.MARGIN_WINDOW, theme.MARGIN_WINDOW)
+        layout.setSpacing(theme.SPACING_SECTIONS)
         header = QLabel(f"{ver.rel}\n{ver.pak} : {ver.stored} — {_FIELDS_LABEL[ver.status]}")
         f = header.font()
         f.setBold(True)
@@ -2038,7 +2058,9 @@ class _FieldDialog(QDialog):
         self._tabs = QTabWidget(self)
         fields_page = QWidget(self)
         fields_layout = QVBoxLayout(fields_page)
-        fields_layout.setContentsMargins(0, 4, 0, 0)
+        fields_layout.setContentsMargins(theme.MARGIN_TAB, theme.MARGIN_TAB,
+                                         theme.MARGIN_TAB, theme.MARGIN_TAB)
+        fields_layout.setSpacing(theme.SPACING_ROW)
         filter_row = QHBoxLayout()
         self._field_search = QLineEdit(fields_page)
         self._field_search.setPlaceholderText("Filter fields…")
@@ -2064,8 +2086,13 @@ class _FieldDialog(QDialog):
         self._compare = _CompareTrees(self._mod_root, van_root, True, self)
         self._compare.edited.connect(self._on_compare_edited)
         self._tabs.addTab(self._compare, "Compare trees")
+        preview_page = QWidget(self)
+        preview_layout = QVBoxLayout(preview_page)
+        preview_layout.setContentsMargins(theme.MARGIN_TAB, theme.MARGIN_TAB,
+                                          theme.MARGIN_TAB, theme.MARGIN_TAB)
         self._preview_tree = _MergedPreview(self)
-        self._tabs.addTab(self._preview_tree, "Merged preview")
+        preview_layout.addWidget(self._preview_tree)
+        self._tabs.addTab(preview_page, "Merged preview")
         self._tabs.currentChanged.connect(self._on_tab_changed)
         layout.addWidget(self._tabs, 1)
 
@@ -2653,14 +2680,14 @@ class MainWindow(QMainWindow):
     def _build_ui(self) -> None:
         central = _AmbientCentral(self)
         layout = QVBoxLayout(central)
-        margins = layout.contentsMargins()
-        layout.setContentsMargins(margins.left(), 0, margins.right(), margins.bottom())
+        layout.setContentsMargins(theme.MARGIN_WINDOW, 0,
+                                  theme.MARGIN_WINDOW, theme.MARGIN_WINDOW)
+        layout.setSpacing(theme.SPACING_SECTIONS)
 
         self._title_bar = _TitleBar(self)
         layout.addWidget(self._title_bar)
 
         mods_row = QHBoxLayout()
-        mods_row.setContentsMargins(8, 6, 8, 0)
         mods_label = QLabel("Mods folder", central)
         mods_label.setForegroundRole(QPalette.ColorRole.WindowText)
         mods_label.setFixedWidth(_PATH_LABEL_WIDTH)
@@ -2675,7 +2702,6 @@ class MainWindow(QMainWindow):
         layout.addLayout(mods_row)
 
         game_row = QHBoxLayout()
-        game_row.setContentsMargins(8, 4, 8, 0)
         game_label = QLabel("Game folder", central)
         game_label.setForegroundRole(QPalette.ColorRole.WindowText)
         game_label.setFixedWidth(_PATH_LABEL_WIDTH)
