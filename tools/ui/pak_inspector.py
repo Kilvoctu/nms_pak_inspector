@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QImage, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -118,19 +118,26 @@ class PakInspectorDialog(QDialog):
         self._preview_title = QLabel("Preview", self)
         pv_layout.addWidget(self._preview_title)
         pf_row = QHBoxLayout()
-        pf_row.addWidget(QLabel("Find:", self))
+        self._preview_find_label = QLabel("Find:", self)
+        pf_row.addWidget(self._preview_find_label)
         self._preview_filter = QLineEdit(self)
         self._preview_filter.setPlaceholderText("filter fields in preview")
         self._preview_filter.textChanged.connect(self._apply_preview_filter)
         pf_row.addWidget(self._preview_filter, 1)
         pv_layout.addLayout(pf_row)
         self._preview_tree = QTreeWidget(self)
-        self._preview_tree.setColumnCount(2)
-        self._preview_tree.setHeaderLabels(["Field", "Value"])
-        self._preview_tree.setColumnWidth(0, 280)
+        self._preview_tree.setColumnCount(3)
+        self._preview_tree.setHeaderLabels(["Field", "Value", "Mod value"])
+        self._preview_tree.setColumnWidth(0, 240)
+        self._preview_tree.setColumnWidth(1, 130)
         self._preview_tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._preview_tree.customContextMenuRequested.connect(self._on_preview_context)
         pv_layout.addWidget(self._preview_tree, 1)
+        self._preview_image = QLabel(self)
+        self._preview_image.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._preview_image.setWordWrap(True)
+        self._preview_image.hide()
+        pv_layout.addWidget(self._preview_image, 1)
         pv_hint = QLabel("Right-click field(s) to pull them into the target mod.", self)
         pv_layout.addWidget(pv_hint)
         split.addWidget(preview_box)
@@ -499,6 +506,10 @@ class PakInspectorDialog(QDialog):
             return
         _, pak, stored = kind
         self._preview_title.setText(f"Preview: {stored}")
+        if stored.lower().endswith(".dds"):
+            self._show_dds_preview(pak, stored)
+            return
+        self._preview_mode(tree=True)
         if not stored.lower().endswith(".mbin"):
             self._preview_tree.addTopLevelItem(
                 QTreeWidgetItem(["(raw file - no preview; pull it to edit externally)", ""])
@@ -568,7 +579,7 @@ class PakInspectorDialog(QDialog):
             self._adopt_entries(mod, pak, stored, elems, hit)
 
     def _mark_mod_fields(self) -> None:
-        """Tint preview rows whose field already exists in the target mod's file."""
+        """Tint preview rows present in the target mod and show their mod value."""
         if self._preview_ctx is None or not self._preview_tree.topLevelItemCount():
             return
         pak, stored, van_root, _template = self._preview_ctx
@@ -580,6 +591,7 @@ class PakInspectorDialog(QDialog):
                 child = item.child(i)
                 child.setForeground(0, QColor("#e8e6ee"))
                 child.setForeground(1, QColor("#e8e6ee"))
+                child.setText(2, "")
                 child.setToolTip(0, "")
                 reset(child)
 
@@ -615,6 +627,8 @@ class PakInspectorDialog(QDialog):
                     if row is not None:
                         row.setForeground(0, _COVERED_COLOR)
                         row.setForeground(1, _COVERED_COLOR)
+                        row.setText(2, mc.get("value") or "")
+                        row.setForeground(2, _COVERED_COLOR)
                         row.setToolTip(0, f"Present in {mod.name}")
                     walk(vc, mc)
 
@@ -626,6 +640,40 @@ class PakInspectorDialog(QDialog):
                 row.setForeground(0, _COVERED_COLOR)
                 row.setForeground(1, _COVERED_COLOR)
                 row.setToolTip(0, f"Adopted into {mod.name} ({action})" if mod else "")
+
+    def _preview_mode(self, tree: bool) -> None:
+        """Toggle the preview pane between the field tree and the image label."""
+        self._preview_tree.setVisible(tree)
+        self._preview_filter.setVisible(tree)
+        self._preview_find_label.setVisible(tree)
+        self._preview_image.setVisible(not tree)
+
+    def _show_dds_preview(self, pak: str, stored: str) -> None:
+        """Render a DDS entry as a scaled thumbnail (Pillow decodes BC formats)."""
+        self._preview_mode(tree=False)
+        self._preview_tree.clear()
+        self._preview_ctx = None
+        try:
+            with paklib.Pak(Path(self._pcbanks) / pak) as pk:
+                data = pk.read_file(stored)
+            import io
+
+            from PIL import Image
+            img = Image.open(io.BytesIO(data))
+            w, h = img.size
+            img.thumbnail((460, 520))
+            if img.mode != "RGBA":
+                img = img.convert("RGBA")
+            qimg = QImage(img.tobytes("raw", "RGBA"), img.width, img.height,
+                          4 * img.width, QImage.Format.Format_RGBA8888)
+            self._preview_image.setPixmap(QPixmap.fromImage(qimg))
+            self._preview_title.setText(f"Preview: {stored}  ({w}x{h})")
+        except Exception as exc:  # noqa: BLE001 - thumbnails are best-effort
+            self._preview_image.setText(
+                f"(no thumbnail for this DDS format: {exc})\n"
+                "Pull it to edit externally."
+            )
+            self._preview_title.setText(f"Preview: {stored}")
 
     def _selected_preview_elems(self) -> list[ET.Element]:
         """Selected preview elements, topmost-only (children of a selected ancestor drop)."""
@@ -745,10 +793,18 @@ class PakInspectorDialog(QDialog):
             return
         target = self._mod_combo.currentText() or "(no mod selected)"
         menu = QMenu(self)
-        act = menu.addAction(f"Pull {len(entries)} file(s) into {target}")
+        act_pull = menu.addAction(f"Pull {len(entries)} file(s) into {target}")
+        menu.addSeparator()
+        act_copy = menu.addAction(
+            f"Copy {len(entries)} path(s) to clipboard"
+            if len(entries) > 1 else "Copy path to clipboard"
+        )
         chosen = menu.exec(self._tree.viewport().mapToGlobal(pos))
-        if chosen is act:
+        if chosen is act_pull:
             self._pull_entries(entries, target)
+        elif chosen is act_copy:
+            paths = "\n".join(sorted(stored.replace("\\", "/") for _pak, stored in entries))
+            QApplication.clipboard().setText(paths)
 
     def _on_pull(self) -> None:
         entries = self._selected_entries()

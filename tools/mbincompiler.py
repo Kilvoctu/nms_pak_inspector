@@ -194,7 +194,8 @@ def download(release: dict) -> dict:
 
 
 def ensure_compiler(game: tuple[int, ...] | None = None) -> dict:
-    """Newest usable compiler: download from the repo if none is good enough."""
+    """Newest usable compiler, downloading when no local one qualifies.
+    Newer-than-game output is load-safe (loose and pak loading both tolerate it)."""
     game = game or game_version()
     local = local_compilers()
     if local:
